@@ -1,14 +1,6 @@
 /****************************************************************************
  * @file      multi_exponentiation_proof.hpp
  * @brief     Logarithmic-size argument for a multi-exponentiation relation.
- *
- * For G = sum_i g_i*a_i, each round publishes L = g_L*a_R and R = g_R*a_L
- * and folds g' = x*g_L + g_R, a' = a_L + x*a_R, G' = x^2*L + x*G + R.
- * A length-n relation uses 2*log2(n) points and one final scalar.
- *
- * This argument is not independently zero knowledge. A composing protocol
- * must mask its secret witness before using it. Length one reveals the input
- * scalar and checks only G = g_0*a_0, without a context-dependent challenge.
  *****************************************************************************/
 
 #ifndef TAIHANG_PROTOCOLS_ZKP_SIGMA_MULTI_EXPONENTIATION_PROOF_HPP
