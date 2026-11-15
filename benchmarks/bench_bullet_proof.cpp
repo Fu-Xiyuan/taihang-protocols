@@ -6,14 +6,18 @@
  * outside the timed region. Each operation is warmed up before measurement.
  *****************************************************************************/
 
+#include <omp.h>
 #include <openssl/obj_mac.h>
 
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -33,12 +37,12 @@ using Milliseconds = std::chrono::duration<double, std::milli>;
 
 constexpr int kCurveId = NID_X9_62_prime256v1;
 constexpr std::size_t kRangeBits = 32;
-constexpr std::size_t kMaxAggregation = 4;
+constexpr std::size_t kMaxAggregation = 8;
 constexpr std::size_t kDefaultIterations = 10;
 constexpr std::size_t kDefaultWarmups = 1;
 constexpr std::string_view kContext = "bulletproof-benchmark";
 
-constexpr std::array<std::size_t, 3> kAggregations = {1, 2, 4};
+constexpr std::array<std::size_t, 3> kAggregations = {1, 4, 8};
 constexpr std::array<int, 4> kThreadCounts = {1, 2, 4, 8};
 
 struct Workload {
@@ -52,23 +56,35 @@ struct BenchResult {
     int thread_count = 0;
     double prove_ms = 0.0;
     double verify_ms = 0.0;
+    std::size_t proof_bytes = 0;
     bool passed = false;
 };
 
-template <typename Function>
+// Validation runs after each call, outside its measured interval.
+template <typename Function, typename Validator>
 double average_ms(std::size_t warmups,
                   std::size_t iterations,
-                  Function&& function) {
+                  Function&& function,
+                  Validator&& validate) {
     for (std::size_t i = 0; i < warmups; ++i) {
         function();
+        validate();
     }
 
-    const auto begin = Clock::now();
+    double elapsed_ms = 0.0;
     for (std::size_t i = 0; i < iterations; ++i) {
+        const Clock::time_point begin = Clock::now();
         function();
+        elapsed_ms += Milliseconds(Clock::now() - begin).count();
+        validate();
     }
-    return Milliseconds(Clock::now() - begin).count() /
-           static_cast<double>(iterations);
+    return elapsed_ms / static_cast<double>(iterations);
+}
+
+void set_thread_count(int thread_count) {
+    config::thread_num = thread_count;
+    omp_set_dynamic(0);
+    omp_set_num_threads(thread_count);
 }
 
 Workload make_workload(const bulletproof::PublicParameters& pp,
@@ -96,29 +112,27 @@ BenchResult run_once(const bulletproof::PublicParameters& pp,
                      int thread_count,
                      std::size_t warmups,
                      std::size_t iterations) {
-    config::thread_num = thread_count;
+    set_thread_count(thread_count);
 
     bulletproof::Proof proof;
+    bool passed = true;
     const double prove_ms = average_ms(warmups, iterations, [&] {
         proof = bulletproof::prove(
             pp, workload.statement, workload.witness, kContext);
+    }, [&] {
+        passed = bulletproof::verify(
+                     pp, workload.statement, proof, kContext) && passed;
     });
 
-    bool passed = bulletproof::verify(
-        pp, workload.statement, proof, kContext);
     const double verify_ms = average_ms(warmups, iterations, [&] {
         passed = bulletproof::verify(
-                     pp, workload.statement, proof, kContext) &&
-                 passed;
-    });
+                     pp, workload.statement, proof, kContext) && passed;
+    }, [] {});
 
-    return {
-        workload.aggregation,
-        thread_count,
-        prove_ms,
-        verify_ms,
-        passed,
-    };
+    std::ostringstream encoded;
+    encoded << proof;
+    return {workload.aggregation, thread_count, prove_ms, verify_ms,
+            encoded.str().size(), passed && encoded.good()};
 }
 
 void print_benchmark_header(std::size_t physical_cores,
@@ -133,11 +147,13 @@ void print_benchmark_header(std::size_t physical_cores,
            "====================================================\n"
         << "Curve               : Secp256r1\n"
         << "Range bits          : " << kRangeBits << "\n"
-        << "Aggregation sizes   : 1, 2, 4\n"
+        << "Aggregation sizes   : 1, 4, 8\n"
         << "OpenMP thread counts: 1, 2, 4, 8\n"
         << "Physical CPU cores  : " << physical_cores << "\n"
         << "Warmup calls        : " << warmups << " per operation\n"
         << "Measured calls      : " << iterations << " per operation\n"
+        << "Proof size          : serialized proof only, in bytes\n"
+        << "Timing excludes     : setup, inputs, validation, serialization\n"
         << "===================================================="
            "====================================================\n";
 }
@@ -153,6 +169,7 @@ void print_workload_header(std::size_t aggregation) {
               << std::left << std::setw(12) << "Threads"
               << std::right << std::setw(16) << "Prove(ms)"
               << std::setw(16) << "Verify(ms)"
+              << std::setw(16) << "Proof(bytes)"
               << std::setw(12) << "Status" << "\n"
               << "----------------------------------------"
                  "----------------------------------------\n";
@@ -163,6 +180,7 @@ void print_workload_result(const BenchResult& result) {
               << std::right << std::fixed << std::setprecision(3)
               << std::setw(16) << result.prove_ms
               << std::setw(16) << result.verify_ms
+              << std::setw(16) << result.proof_bytes
               << std::setw(12) << (result.passed ? "PASS" : "FAIL")
               << "\n";
 }
@@ -183,6 +201,7 @@ void print_summary(const std::vector<BenchResult>& results) {
         << std::setw(13) << "Prove(x)"
         << std::setw(14) << "Verify(ms)"
         << std::setw(14) << "Verify(x)"
+        << std::setw(16) << "Proof(bytes)"
         << std::setw(10) << "Status" << "\n"
         << "----------------------------------------------------"
            "----------------------------------------------------\n";
@@ -217,6 +236,7 @@ void print_summary(const std::vector<BenchResult>& results) {
                       << std::setw(13) << prove_speedup
                       << std::setw(14) << result.verify_ms
                       << std::setw(14) << verify_speedup
+                      << std::setw(16) << result.proof_bytes
                       << std::setw(10)
                       << (result.passed ? "PASS" : "FAIL") << "\n";
         }
@@ -229,8 +249,10 @@ void print_summary(const std::vector<BenchResult>& results) {
 
 std::size_t parse_positive(const char* value, const char* name) {
     char* end = nullptr;
+    errno = 0;
     const unsigned long long parsed = std::strtoull(value, &end, 10);
-    if (*value == '\0' || *end != '\0' || parsed == 0) {
+    if (*value < '0' || *value > '9' || *end != '\0' || parsed == 0 ||
+        errno == ERANGE || parsed > std::numeric_limits<std::size_t>::max()) {
         std::cerr << name << " must be a positive integer\n";
         std::exit(EXIT_FAILURE);
     }
@@ -255,7 +277,7 @@ int main(int argc, char** argv) {
     print_benchmark_header(physical_cores, warmups, iterations);
 
     // One setup supports all three power-of-two aggregation sizes.
-    config::thread_num = 1;
+    set_thread_count(1);
     const bulletproof::PublicParameters pp = bulletproof::setup(
         kCurveId, kRangeBits, kMaxAggregation);
 
@@ -267,6 +289,7 @@ int main(int argc, char** argv) {
 
     std::vector<BenchResult> summary;
     summary.reserve(kAggregations.size() * kThreadCounts.size());
+    bool passed = true;
     for (const Workload& workload : workloads) {
         print_workload_header(workload.aggregation);
         for (int thread_count : kThreadCounts) {
@@ -274,9 +297,10 @@ int main(int argc, char** argv) {
                 pp, workload, thread_count, warmups, iterations);
             print_workload_result(result);
             summary.emplace_back(result);
+            passed = result.passed && passed;
         }
     }
 
     print_summary(summary);
-    return 0;
+    return passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }
