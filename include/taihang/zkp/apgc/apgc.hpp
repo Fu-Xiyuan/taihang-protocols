@@ -69,22 +69,33 @@ struct GenerationMetrics {
     std::size_t proof_bytes{0};
 };
 
-PublicParameters setup(int curve_id, std::size_t participant_count,
-                       std::size_t receiver_count, std::size_t message_bits = 32,
+PublicParameters setup(int curve_id,
+                       std::size_t participant_count,
+                       std::size_t receiver_count,
+                       std::size_t message_bits = 32,
                        std::size_t serial_bits = 256);
-Account create_account(const PublicParameters& pp, const std::string& identity,
-                        const BigInt& initial_balance);
+Account create_account(const PublicParameters& pp,
+                       const std::string& identity,
+                       const BigInt& initial_balance);
 Account initialize_account(const PublicParameters& pp);
-BigInt reveal_balance(const PublicParameters& pp, const Account& account,
-                       const dlog::BSGSSolver& solver);
-Transaction create_transaction(const PublicParameters& pp, const Account& sender,
-    const std::vector<BigInt>& amounts, const std::vector<Participant>& participants,
-    std::size_t sender_index, const std::vector<std::size_t>& receiver_indices,
-    GenerationMetrics* metrics = nullptr);
-bool verify_transaction(const PublicParameters& pp, const Transaction& transaction,
-                         const std::vector<Participant>& participants);
-bool update_accounts(const PublicParameters& pp, const Transaction& transaction,
-                       std::vector<Account>& accounts, const dlog::BSGSSolver& solver);
+BigInt reveal_balance(const PublicParameters& pp,
+                      const Account& account,
+                      const dlog::BSGSSolver& solver);
+Transaction create_transaction(const PublicParameters& pp,
+                               const Account& sender,
+                               const std::vector<BigInt>& amounts,
+                               const std::vector<Participant>& participants,
+                               std::size_t sender_index,
+                               const std::vector<std::size_t>& receiver_indices,
+                               const dlog::BSGSSolver& solver,
+                               GenerationMetrics* metrics = nullptr);
+bool verify_transaction(const PublicParameters& pp,
+                        const Transaction& transaction,
+                        const std::vector<Participant>& participants);
+bool update_accounts(const PublicParameters& pp,
+                     const Transaction& transaction,
+                     std::vector<Account>& accounts,
+                     const dlog::BSGSSolver& solver);
 Transaction initialize_transaction(const PublicParameters& pp);
 
 } // namespace taihang::zkp::apgc

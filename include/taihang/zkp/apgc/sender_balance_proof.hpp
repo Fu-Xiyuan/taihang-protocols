@@ -6,7 +6,9 @@
 #ifndef TAIHANG_PROTOCOLS_APGC_SENDER_BALANCE_PROOF_HPP
 #define TAIHANG_PROTOCOLS_APGC_SENDER_BALANCE_PROOF_HPP
 
-#include <taihang/zkp/apgc/ciphertext_homomorphism_proof.hpp>
+#include <taihang/pke/twisted_elgamal.hpp>
+#include <taihang/zkp/range_proofs/bullet_proof.hpp>
+#include <taihang/zkp/sigma_protocols/homomorphism_evaluation_proof.hpp>
 #include <taihang/zkp/sigma_protocols/fixed_weight_binary_vector_proof.hpp>
 #include <taihang/zkp/sigma_protocols/multi_exponentiation_proof.hpp>
 
@@ -43,7 +45,7 @@ struct Proof {
     ZnElement k;
     ZnElement f;
     ECPoint a_x;
-    ciphertext_homomorphism::Proof homomorphism;
+    nizk::homomorphism_evaluation::Proof homomorphism;
     nizk::fixed_weight_binary_vector::Proof binary;
     nizk::multi_exponentiation::Proof representation;
     range_proofs::bulletproof::Proof range;
@@ -81,8 +83,10 @@ Proof prove_with_state(const PublicParameters& pp,
 
 bool valid_statement(const PublicParameters& pp, const Statement& statement);
 /** @brief Original transcript passed from SdrBalance's final AmorHom to Solvent. */
-std::string homomorphism_transcript(const PublicParameters& pp, const Statement& statement,
-                                   const Proof& proof, std::string_view context = {});
+std::string homomorphism_transcript(const PublicParameters& pp,
+                                    const Statement& statement,
+                                    const Proof& proof,
+                                    std::string_view context = {});
 
 } // namespace detail
 

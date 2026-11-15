@@ -18,12 +18,16 @@ struct PublicParameters {
 };
 
 using Statement = heterogeneous::Statement;
-/** @brief User map dimensions exclude the extra internal bridge coordinate. */
-using Witness = heterogeneous::Witness;
+/** @brief Selected openings and their caller-supplied bridge randomness. */
+struct Witness {
+    std::vector<std::size_t> indices;
+    std::vector<std::vector<ZnElement>> openings;
+    std::vector<ZnElement> randomness;
+};
 
 struct Proof {
     heterogeneous::Proof core;
-    nizk::aggregate_range::Proof range;
+    nizk::aggregate_range::DelayedProof range;
     bool operator==(const Proof& other) const;
     bool operator!=(const Proof& other) const { return !(*this == other); }
     friend std::ostream& operator<<(std::ostream& os, const Proof& proof);
@@ -32,12 +36,20 @@ struct Proof {
 };
 
 /** @brief Range-constrain coordinate zero of each selected opening vector. */
-PublicParameters setup(int curve_id, std::size_t statement_count, std::size_t threshold,
-                       std::size_t opening_length, std::size_t output_length, std::size_t range_bits);
-Proof prove(const PublicParameters& pp, const Statement& statement,
-            const Witness& witness, std::string_view context = {});
-bool verify(const PublicParameters& pp, const Statement& statement,
-            const Proof& proof, std::string_view context = {});
+PublicParameters setup(int curve_id,
+                       std::size_t statement_count,
+                       std::size_t threshold,
+                       std::size_t opening_length,
+                       std::size_t output_length,
+                       std::size_t range_bits);
+Proof prove(const PublicParameters& pp,
+            const Statement& statement,
+            const Witness& witness,
+            std::string_view context = {});
+bool verify(const PublicParameters& pp,
+            const Statement& statement,
+            const Proof& proof,
+            std::string_view context = {});
 
 } // namespace taihang::zkp::k_out_of_n::heterogeneous_range
 #endif // TAIHANG_PROTOCOLS_ZKP_HETEROGENEOUS_RANGE_PROOF_HPP

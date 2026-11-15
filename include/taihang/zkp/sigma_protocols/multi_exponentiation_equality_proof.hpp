@@ -78,7 +78,10 @@ struct Proof {
     bool operator!=(const Proof& other) const { return !(*this == other); }
 
     friend std::ostream& operator<<(std::ostream& os, const Proof& proof);
-    /** @note Initialize point/scalar contexts and resize all four vectors to pp.rounds before reading. */
+    /**
+     * @note Initialize point/scalar contexts and resize all four vectors to
+     * pp.rounds before reading.
+     */
     friend std::istream& operator>>(std::istream& is, Proof& proof);
 };
 

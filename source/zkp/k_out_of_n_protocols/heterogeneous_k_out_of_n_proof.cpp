@@ -23,11 +23,12 @@ namespace {
 
 using ScalarVector = std::vector<ZnElement>;
 namespace binary = taihang::zkp::nizk::fixed_weight_binary_vector;
+namespace representation = taihang::zkp::nizk::multi_exponentiation;
 namespace evaluation = taihang::zkp::nizk::homomorphism_evaluation;
 
 bool parameter_dimensions(const PublicParameters& pp) {
-    const auto& cp = pp.commitment;
-    const auto& bp = pp.selection;
+    const evaluation::PublicParameters& cp = pp.commitment;
+    const binary::PublicParameters& bp = pp.selection;
     return taihang::arithmetic::is_pow2(pp.statement_count) &&
         pp.threshold > 0 && pp.threshold <= pp.statement_count &&
         pp.opening_length > 0 && pp.output_length > 0 &&
@@ -44,19 +45,25 @@ bool parameter_dimensions(const PublicParameters& pp) {
         bp.group_ctx == cp.group_ctx && bp.ring_ctx == cp.ring_ctx;
 }
 
-evaluation::PublicParameters consistency_parameters(const PublicParameters& pp) {
-    auto bases = pp.commitment.vector_g;
-    for (std::size_t j = 0; j < pp.statement_count; ++j) {
-        bases[j] = pp.selection.vector_h[j];
+representation::PublicParameters consistency_parameters(const PublicParameters& pp) {
+    std::vector<ECPoint> bases;
+    if (pp.opening_length == 1 && pp.output_length == 1) {
+        bases = pp.selection.vector_h;
+    } else {
+        bases = pp.commitment.vector_g;
+        for (std::size_t j = 0; j < pp.statement_count; ++j) {
+            bases[j] = pp.selection.vector_h[j];
+        }
     }
-    return evaluation::setup(pp.commitment.group_ctx, pp.commitment.ring_ctx, pp.selection.u, bases);
+    return representation::setup(pp.commitment.group_ctx, pp.commitment.ring_ctx, bases);
 }
 
 /** Batch the n maps with powers of rho, keeping output coordinates separate. */
-std::vector<std::vector<ECPoint>> relation_bases(const PublicParameters& pp,
-                                                const Statement& statement,
-                                                const std::string& transcript) {
-    const auto& cp = pp.commitment;
+std::vector<std::vector<ECPoint>> relation_bases(
+    const PublicParameters& pp,
+    const Statement& statement,
+    const std::string& transcript) {
+    const evaluation::PublicParameters& cp = pp.commitment;
     ZnElement rho = hash_to_zn(transcript, *cp.ring_ctx);
     if (rho.value.is_zero()) {
         rho = cp.ring_ctx->get_one();
@@ -74,13 +81,21 @@ std::vector<std::vector<ECPoint>> relation_bases(const PublicParameters& pp,
         }
         power *= rho;
     }
+    if (pp.opening_length == 1 && pp.output_length == 1) {
+        for (ECPoint& base : rows.front()) {
+            base = -base;
+        }
+    }
     return rows;
 }
 
 } // namespace
 
-PublicParameters setup(int curve_id, std::size_t statement_count, std::size_t threshold,
-                       std::size_t opening_length, std::size_t output_length) {
+PublicParameters setup(int curve_id,
+                       std::size_t statement_count,
+                       std::size_t threshold,
+                       std::size_t opening_length,
+                       std::size_t output_length) {
     TAIHANG_ASSERT(taihang::arithmetic::is_pow2(statement_count) && threshold > 0 &&
                        threshold <= statement_count, "heterogeneous invalid count or threshold");
     TAIHANG_ASSERT(opening_length > 0 && output_length > 0 &&
@@ -100,8 +115,8 @@ PublicParameters setup(int curve_id, std::size_t statement_count, std::size_t th
     pp.opening_length = opening_length;
     pp.output_length = output_length;
     pp.selection = binary::setup(curve_id, statement_count);
-    const auto& bp = pp.selection;
-    auto bases = std::vector<ECPoint>(padded, bp.group_ctx->get_infinity());
+    const binary::PublicParameters& bp = pp.selection;
+    std::vector<ECPoint> bases = std::vector<ECPoint>(padded, bp.group_ctx->get_infinity());
     for (std::size_t j = 0; j < statement_count; ++j) {
         bases[j] = bp.vector_g[j];
     }
@@ -114,27 +129,33 @@ PublicParameters setup(int curve_id, std::size_t statement_count, std::size_t th
             bases[i] = hash_to_curve_fast(label, *bp.group_ctx);
         }
     }
+    if (opening_length == 1 && output_length == 1) {
+        for (std::size_t j = 0; j < statement_count; ++j) {
+            bases[statement_count + j] = bp.vector_h[j];
+        }
+    }
     pp.commitment = evaluation::setup(bp.group_ctx, bp.ring_ctx, bp.u, bases);
     return pp;
 }
 
 bool Proof::operator==(const Proof& other) const {
-    return p == other.p && s == other.s && selection == other.selection &&
+    return p == other.p && s == other.s && selection == other.selection && a_x == other.a_x &&
+        f == other.f &&
            consistency == other.consistency && evaluations == other.evaluations;
 }
 
 std::ostream& operator<<(std::ostream& os, const Proof& proof) {
-    os << proof.p << proof.s << proof.selection << proof.consistency;
+    os << proof.p << proof.s << proof.a_x << proof.f << proof.selection << proof.consistency;
     const std::uint64_t count = proof.evaluations.size();
     os.write(reinterpret_cast<const char*>(&count), sizeof(count));
-    for (const auto& evaluation : proof.evaluations) {
+    for (const evaluation::Proof& evaluation : proof.evaluations) {
         os << evaluation;
     }
     return os;
 }
 
 std::istream& operator>>(std::istream& is, Proof& proof) {
-    is >> proof.p >> proof.s;
+    is >> proof.p >> proof.s >> proof.a_x >> proof.f;
     if (is) {
         is >> proof.selection;
     }
@@ -149,7 +170,7 @@ std::istream& operator>>(std::istream& is, Proof& proof) {
         is.setstate(std::ios::failbit);
         return is;
     }
-    for (auto& evaluation : proof.evaluations) {
+    for (evaluation::Proof& evaluation : proof.evaluations) {
         if (!(is >> evaluation)) {
             return is;
         }
@@ -157,15 +178,20 @@ std::istream& operator>>(std::istream& is, Proof& proof) {
     return is;
 }
 
-Proof prove(const PublicParameters& pp, const Statement& statement,
-            const Witness& witness, std::string_view context) {
-    TAIHANG_ASSERT(detail::valid_statement(pp, statement), "heterogeneous statement dimensions mismatch");
-    const auto state = detail::prepare(pp, witness);
+Proof prove(const PublicParameters& pp,
+            const Statement& statement,
+            const Witness& witness,
+            std::string_view context) {
+    TAIHANG_ASSERT(detail::valid_statement(pp, statement),
+        "heterogeneous statement dimensions mismatch");
+    const detail::ProverState state = detail::prepare(pp, witness);
     return detail::prove_prepared(pp, statement, state, context);
 }
 
-bool verify(const PublicParameters& pp, const Statement& statement,
-            const Proof& proof, std::string_view context) {
+bool verify(const PublicParameters& pp,
+            const Statement& statement,
+            const Proof& proof,
+            std::string_view context) {
     return detail::verify_extended(pp, statement, proof, context);
 }
 
@@ -191,17 +217,19 @@ bool valid_statement(const PublicParameters& pp, const Statement& statement) {
 
 ProverState prepare(const PublicParameters& pp, const Witness& witness) {
     TAIHANG_ASSERT(valid_parameters(pp), "heterogeneous parameter dimensions mismatch");
-    TAIHANG_ASSERT(witness.indices.size() == pp.threshold && witness.openings.size() == pp.threshold,
+    TAIHANG_ASSERT(witness.indices.size() == pp.threshold &&
+        witness.openings.size() == pp.threshold,
                    "heterogeneous witness length mismatch");
-    const auto& cp = pp.commitment;
-    const auto zero = cp.ring_ctx->get_zero();
-    const auto one = cp.ring_ctx->get_one();
+    const evaluation::PublicParameters& cp = pp.commitment;
+    const ZnElement zero = cp.ring_ctx->get_zero();
+    const ZnElement one = cp.ring_ctx->get_one();
     ProverState state{ScalarVector(cp.vector_length, zero), ScalarVector(pp.statement_count, zero),
-        ScalarVector(pp.statement_count, -one), cp.ring_ctx->gen_random(), cp.ring_ctx->gen_random(),
+        ScalarVector(pp.statement_count, -one), cp.ring_ctx->gen_random(),
+            cp.ring_ctx->gen_random(),
         ECPoint(cp.group_ctx), ECPoint(cp.group_ctx)};
     std::vector<bool> used(pp.statement_count, false);
     for (std::size_t i = 0; i < pp.threshold; ++i) {
-        const auto j = witness.indices[i];
+        const std::size_t j = witness.indices[i];
         TAIHANG_ASSERT(j < pp.statement_count, "heterogeneous index out of range");
         TAIHANG_ASSERT(!used[j], "heterogeneous indices must be distinct");
         TAIHANG_ASSERT(witness.openings[i].size() == pp.opening_length,
@@ -220,90 +248,126 @@ ProverState prepare(const PublicParameters& pp, const Witness& witness) {
     return state;
 }
 
-std::string binding_context(const PublicParameters& pp, const Statement& statement,
-                             const ECPoint& p, const ECPoint& s, std::string_view context) {
+std::string binding_context(const PublicParameters& pp,
+                            const Statement& statement,
+                            const ECPoint& p,
+                            const ECPoint& s,
+                            std::string_view context) {
     std::ostringstream transcript;
-    transcript << "taihang/heterogeneous-k-out-of-n/v1" << BigInt(uint64_t{context.size()});
-    transcript.write(context.data(), static_cast<std::streamsize>(context.size()));
-    transcript << BigInt(uint64_t{pp.statement_count}) << BigInt(uint64_t{pp.threshold})
-               << BigInt(uint64_t{pp.opening_length}) << BigInt(uint64_t{pp.output_length})
-               << BigInt(static_cast<uint64_t>(pp.selection.curve_id))
-               << pp.selection.g << pp.selection.h << pp.selection.u << pp.selection.inner_product_u;
-    for (const auto* bases : {&pp.selection.vector_g, &pp.selection.vector_h, &pp.commitment.vector_g}) {
-        for (const auto& base : *bases) {
-            transcript << base;
+    transcript << context;
+    if (pp.opening_length == 1 && pp.output_length == 1) {
+        transcript << p;
+        for (const std::vector<ECPoint>& output : statement.outputs) {
+            transcript << output.front();
         }
     }
-    for (std::size_t j = 0; j < pp.statement_count; ++j) {
-        for (const auto& base : statement.bases[j]) {
-            transcript << base;
-        }
-        for (const auto& output : statement.outputs[j]) {
-            transcript << output;
-        }
-    }
-    transcript << p << s;
     return transcript.str();
 }
 
-Proof prove_prepared(const PublicParameters& pp, const Statement& statement,
-                     const ProverState& state, std::string_view context,
-                     const std::vector<ECPoint>* bridge_bases, const ECPoint* bridge_target) {
+Proof prove_prepared(const PublicParameters& pp,
+                     const Statement& statement,
+                     const ProverState& state,
+                     std::string_view context,
+                     const std::vector<ECPoint>* bridge_bases,
+                     const ECPoint* bridge_target,
+                     std::string_view evaluation_context) {
     TAIHANG_ASSERT(valid_statement(pp, statement), "heterogeneous statement dimensions mismatch");
-    TAIHANG_ASSERT((bridge_bases == nullptr) == (bridge_target == nullptr), "heterogeneous bridge mismatch");
+    TAIHANG_ASSERT((bridge_bases == nullptr) == (bridge_target == nullptr),
+        "heterogeneous bridge mismatch");
     const std::string parent = binding_context(pp, statement, state.p, state.s, context);
     Proof proof;
     proof.p = state.p;
     proof.s = state.s;
     proof.selection = binary::prove(pp.selection, {state.s, pp.threshold},
-                                    {state.selection, state.complement, state.r_s}, parent);
-    const auto projection = consistency_parameters(pp);
-    auto difference = state.y;
-    for (std::size_t j = 0; j < pp.statement_count; ++j) {
-        difference[j] = pp.commitment.ring_ctx->get_one() - state.selection[j];
+                                    {state.selection, state.complement, state.r_s});
+    const representation::PublicParameters projection = consistency_parameters(pp);
+    ScalarVector difference;
+    if (pp.opening_length == 1 && pp.output_length == 1) {
+        difference.resize(pp.statement_count, pp.commitment.ring_ctx->get_zero());
+        for (std::size_t j = 0; j < pp.statement_count; ++j) {
+            difference[j] = state.y[pp.statement_count + j] +
+                pp.commitment.ring_ctx->get_one() - state.selection[j];
+        }
+    } else {
+        difference = state.y;
+        for (std::size_t j = 0; j < pp.statement_count; ++j) {
+            difference[j] = pp.commitment.ring_ctx->get_one() - state.selection[j];
+        }
     }
-    proof.consistency = evaluation::prove(projection,
-        {state.p - state.s, pp.commitment.group_ctx->get_infinity(),
-         std::vector<ECPoint>(projection.vector_length, pp.commitment.group_ctx->get_infinity())},
-        {difference, state.r_p - state.r_s}, parent);
-    auto rows = relation_bases(pp, statement, parent);
+    const ScalarVector alpha = gen_random_znelement_vector(
+        pp.commitment.ring_ctx, projection.vector_length);
+    const ZnElement beta = pp.commitment.ring_ctx->gen_random();
+    proof.a_x = ec_point_msm(projection.g, alpha) + pp.selection.u * beta;
+    std::ostringstream transcript;
+    transcript << proof.a_x;
+    const ZnElement e = hash_to_zn(transcript.str(), *pp.commitment.ring_ctx);
+    proof.f = beta + e * (state.r_p - state.r_s);
+    ScalarVector response = alpha;
+    for (std::size_t i = 0; i < response.size(); ++i) {
+        response[i] += e * difference[i];
+    }
+    proof.consistency = representation::prove(projection,
+        {(state.p - state.s) * e + proof.a_x - pp.selection.u * proof.f},
+        {response});
+    std::vector<std::vector<ECPoint>> rows = relation_bases(pp, statement, parent);
     if (bridge_bases) {
         rows.push_back(*bridge_bases);
     }
     for (std::size_t q = 0; q < rows.size(); ++q) {
-        const auto target = q == pp.output_length ? *bridge_target : pp.commitment.group_ctx->get_infinity();
-        proof.evaluations.push_back(evaluation::prove(pp.commitment, {state.p, target, rows[q]},
-            {state.y, state.r_p}, parent + "/output/" + std::to_string(q)));
+        const ECPoint target =
+            q == pp.output_length ? *bridge_target : pp.commitment.group_ctx->get_infinity();
+        std::string mask_context(evaluation_context.empty() ? context : evaluation_context);
+        std::ostringstream suffix;
+        if (bridge_bases) {
+            suffix << BigInt(uint64_t{q});
+        }
+        proof.evaluations.push_back(evaluation::detail::prove_with_transcript(
+            pp.commitment, {state.p, target, rows[q]}, {state.y, state.r_p},
+            mask_context, true, suffix.str()));
     }
     return proof;
 }
 
-bool verify_extended(const PublicParameters& pp, const Statement& statement,
-                      const Proof& proof, std::string_view context,
-                      const std::vector<ECPoint>* bridge_bases, const ECPoint* bridge_target) {
-    if (!valid_statement(pp, statement) || (bridge_bases == nullptr) != (bridge_target == nullptr) ||
+bool verify_extended(const PublicParameters& pp,
+                     const Statement& statement,
+                     const Proof& proof,
+                     std::string_view context,
+                     const std::vector<ECPoint>* bridge_bases,
+                     const ECPoint* bridge_target,
+                     std::string_view evaluation_context) {
+    if (!valid_statement(pp,
+        statement) || (bridge_bases == nullptr) != (bridge_target == nullptr) ||
         proof.evaluations.size() != pp.output_length + (bridge_bases ? 1 : 0)) {
         return false;
     }
     const std::string parent = binding_context(pp, statement, proof.p, proof.s, context);
-    if (!binary::verify(pp.selection, {proof.s, pp.threshold}, proof.selection, parent)) {
+    if (!binary::verify(pp.selection, {proof.s, pp.threshold}, proof.selection)) {
         return false;
     }
-    const auto projection = consistency_parameters(pp);
-    if (!evaluation::verify(projection,
-        {proof.p - proof.s, pp.commitment.group_ctx->get_infinity(),
-         std::vector<ECPoint>(projection.vector_length, pp.commitment.group_ctx->get_infinity())},
-        proof.consistency, parent)) {
+    const representation::PublicParameters projection = consistency_parameters(pp);
+    std::ostringstream transcript;
+    transcript << proof.a_x;
+    const ZnElement e = hash_to_zn(transcript.str(), *pp.commitment.ring_ctx);
+    if (!representation::verify(projection,
+        {(proof.p - proof.s) * e + proof.a_x - pp.selection.u * proof.f},
+        proof.consistency)) {
         return false;
     }
-    auto rows = relation_bases(pp, statement, parent);
+    std::vector<std::vector<ECPoint>> rows = relation_bases(pp, statement, parent);
     if (bridge_bases) {
         rows.push_back(*bridge_bases);
     }
     for (std::size_t q = 0; q < rows.size(); ++q) {
-        const auto target = q == pp.output_length ? *bridge_target : pp.commitment.group_ctx->get_infinity();
-        if (!evaluation::verify(pp.commitment, {proof.p, target, rows[q]}, proof.evaluations[q],
-            parent + "/output/" + std::to_string(q))) {
+        const ECPoint target =
+            q == pp.output_length ? *bridge_target : pp.commitment.group_ctx->get_infinity();
+        std::string mask_context(evaluation_context.empty() ? context : evaluation_context);
+        std::ostringstream suffix;
+        if (bridge_bases) {
+            suffix << BigInt(uint64_t{q});
+        }
+        if (!evaluation::detail::verify_with_transcript(pp.commitment,
+            {proof.p, target, rows[q]}, proof.evaluations[q], mask_context,
+            true, suffix.str())) {
             return false;
         }
     }

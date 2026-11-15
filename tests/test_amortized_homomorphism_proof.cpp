@@ -102,7 +102,8 @@ TEST_F(AmortizedHomomorphismProofTest, SetupCreatesDeterministicBasesAndPadding)
     EXPECT_FALSE(pp.g.is_at_infinity());
     EXPECT_FALSE(pp.u.is_at_infinity());
     EXPECT_NE(pp.g, pp.u);
-    const auto repeated = amortized::setup(pp.curve_id, pp.statement_count, pp.threshold);
+    const amortized::PublicParameters repeated = amortized::setup(pp.curve_id,
+        pp.statement_count, pp.threshold);
     EXPECT_EQ(pp.g.to_bytes(), repeated.g.to_bytes());
     EXPECT_EQ(pp.u.to_bytes(), repeated.u.to_bytes());
     for (std::size_t i = 0; i < pp.vector_length; ++i) {
@@ -116,7 +117,7 @@ TEST_F(AmortizedHomomorphismProofTest, SetupCreatesDeterministicBasesAndPadding)
 }
 
 TEST_F(AmortizedHomomorphismProofTest, SetupReusesParentContextsAndPaddedBases) {
-    const auto composed = amortized::setup(
+    const amortized::PublicParameters composed = amortized::setup(
         pp.group_ctx, pp.ring_ctx, pp.statement_count, pp.threshold,
         pp.g, pp.u, pp.vector_g);
     EXPECT_EQ(composed.group_ctx.get(), pp.group_ctx.get());
@@ -143,7 +144,7 @@ TEST_F(AmortizedHomomorphismProofTest, WitnessSatisfiesEachUnbatchedRelation) {
 }
 
 TEST_F(AmortizedHomomorphismProofTest, AcceptsValidProofAndExpectedSize) {
-    const auto proof = amortized::prove(pp, statement, witness);
+    const amortized::Proof proof = amortized::prove(pp, statement, witness);
     EXPECT_TRUE(amortized::verify(pp, statement, proof));
     EXPECT_EQ(proof.equality_proof.left_g.size(), pp.rounds);
     std::stringstream stream;
@@ -154,8 +155,8 @@ TEST_F(AmortizedHomomorphismProofTest, AcceptsValidProofAndExpectedSize) {
 }
 
 TEST_F(AmortizedHomomorphismProofTest, FreshMasksProduceDifferentValidProofs) {
-    const auto first = amortized::prove(pp, statement, witness);
-    const auto second = amortized::prove(pp, statement, witness);
+    const amortized::Proof first = amortized::prove(pp, statement, witness);
+    const amortized::Proof second = amortized::prove(pp, statement, witness);
     EXPECT_NE(first.a_p, second.a_p);
     EXPECT_NE(first.a_f, second.a_f);
     EXPECT_NE(first, second);
@@ -164,8 +165,10 @@ TEST_F(AmortizedHomomorphismProofTest, FreshMasksProduceDifferentValidProofs) {
 }
 
 TEST_F(AmortizedHomomorphismProofTest, AcceptsZeroWitnessAndIdentityStatements) {
-    auto zero = witness;
-    for (auto& scalar : zero.y) scalar = pp.ring_ctx->get_zero();
+    amortized::Witness zero = witness;
+    for (ZnElement& scalar : zero.y) {
+        scalar = pp.ring_ctx->get_zero();
+    }
     zero.r = pp.ring_ctx->get_zero();
     const amortized::Statement identity{
         pp.group_ctx->get_infinity(),
@@ -176,46 +179,46 @@ TEST_F(AmortizedHomomorphismProofTest, AcceptsZeroWitnessAndIdentityStatements) 
 }
 
 TEST_F(AmortizedHomomorphismProofTest, RejectsIncorrectCommitmentOpening) {
-    auto wrong = witness;
+    amortized::Witness wrong = witness;
     wrong.r += pp.ring_ctx->get_one();
     EXPECT_FALSE(amortized::verify(
         pp, statement, amortized::prove(pp, statement, wrong)));
-    auto changed = statement;
+    amortized::Statement changed = statement;
     changed.p = changed.p + pp.u;
     EXPECT_FALSE(amortized::verify(
         pp, changed, amortized::prove(pp, changed, witness)));
 }
 
 TEST_F(AmortizedHomomorphismProofTest, RejectsCorrectOpeningWithWrongPolynomial) {
-    auto wrong = witness;
+    amortized::Witness wrong = witness;
     wrong.y[0] += pp.ring_ctx->get_one();
-    auto changed = statement;
+    amortized::Statement changed = statement;
     changed.p = ec_point_msm(pp.vector_g, wrong.y) + pp.u * wrong.r;
     EXPECT_FALSE(amortized::verify(
         pp, changed, amortized::prove(pp, changed, wrong)));
 }
 
 TEST_F(AmortizedHomomorphismProofTest, RejectsCorrectOpeningWithWrongHomomorphismValue) {
-    auto wrong = witness;
+    amortized::Witness wrong = witness;
     wrong.y[pp.statement_count - pp.threshold] += pp.ring_ctx->get_one();
-    auto changed = statement;
+    amortized::Statement changed = statement;
     changed.p = ec_point_msm(pp.vector_g, wrong.y) + pp.u * wrong.r;
     EXPECT_FALSE(amortized::verify(
         pp, changed, amortized::prove(pp, changed, wrong)));
 }
 
 TEST_F(AmortizedHomomorphismProofTest, RejectsChangedPublicStatementBeforeProving) {
-    auto changed = statement;
+    amortized::Statement changed = statement;
     changed.c[0] = changed.c[0] + pp.u;
     EXPECT_FALSE(amortized::verify(
         pp, changed, amortized::prove(pp, changed, witness)));
 }
 
 TEST_F(AmortizedHomomorphismProofTest, BindsContextCommitmentAndStatementOrder) {
-    const auto proof = amortized::prove(pp, statement, witness, "session-a");
+    const amortized::Proof proof = amortized::prove(pp, statement, witness, "session-a");
     EXPECT_TRUE(amortized::verify(pp, statement, proof, "session-a"));
     EXPECT_FALSE(amortized::verify(pp, statement, proof, "session-b"));
-    auto changed = statement;
+    amortized::Statement changed = statement;
     changed.p = changed.p + pp.u;
     EXPECT_FALSE(amortized::verify(pp, changed, proof, "session-a"));
     for (std::size_t j = 0; j < pp.statement_count; ++j) {
@@ -229,8 +232,8 @@ TEST_F(AmortizedHomomorphismProofTest, BindsContextCommitmentAndStatementOrder) 
 }
 
 TEST_F(AmortizedHomomorphismProofTest, BindsThresholdAndCommitmentBases) {
-    const auto proof = amortized::prove(pp, statement, witness);
-    auto changed = pp;
+    const amortized::Proof proof = amortized::prove(pp, statement, witness);
+    amortized::PublicParameters changed = pp;
     changed.threshold = 1;
     EXPECT_FALSE(amortized::verify(changed, statement, proof));
     changed = pp;
@@ -245,8 +248,8 @@ TEST_F(AmortizedHomomorphismProofTest, BindsThresholdAndCommitmentBases) {
 }
 
 TEST_F(AmortizedHomomorphismProofTest, RejectsTamperedOuterMessagesAndResponse) {
-    const auto valid = amortized::prove(pp, statement, witness);
-    auto proof = valid;
+    const amortized::Proof valid = amortized::prove(pp, statement, witness);
+    amortized::Proof proof = valid;
     proof.a_p = proof.a_p + pp.g;
     EXPECT_FALSE(amortized::verify(pp, statement, proof));
     proof = valid;
@@ -258,43 +261,46 @@ TEST_F(AmortizedHomomorphismProofTest, RejectsTamperedOuterMessagesAndResponse) 
 }
 
 TEST_F(AmortizedHomomorphismProofTest, RejectsTamperedEmbeddedProof) {
-    const auto valid = amortized::prove(pp, statement, witness);
-    for (const auto member : {&multi_exp_eq::Proof::left_g,
-                              &multi_exp_eq::Proof::right_g,
-                              &multi_exp_eq::Proof::left_p,
-                              &multi_exp_eq::Proof::right_p}) {
-        auto proof = valid;
+    const amortized::Proof valid = amortized::prove(pp, statement, witness);
+    for (std::vector<ECPoint> multi_exp_eq::Proof::* const member :
+         {&multi_exp_eq::Proof::left_g,
+          &multi_exp_eq::Proof::right_g,
+          &multi_exp_eq::Proof::left_p,
+          &multi_exp_eq::Proof::right_p}) {
+        amortized::Proof proof = valid;
         (proof.equality_proof.*member)[0] =
             (proof.equality_proof.*member)[0] + pp.g;
         EXPECT_FALSE(amortized::verify(pp, statement, proof));
     }
-    auto proof = valid;
+    amortized::Proof proof = valid;
     proof.equality_proof.a += pp.ring_ctx->get_one();
     EXPECT_FALSE(amortized::verify(pp, statement, proof));
 }
 
 TEST_F(AmortizedHomomorphismProofTest, RejectsMalformedDimensions) {
-    const auto valid = amortized::prove(pp, statement, witness);
-    auto changed_statement = statement;
+    const amortized::Proof valid = amortized::prove(pp, statement, witness);
+    amortized::Statement changed_statement = statement;
     changed_statement.c.pop_back();
     EXPECT_FALSE(amortized::verify(pp, changed_statement, valid));
-    for (const auto member : {&multi_exp_eq::Proof::left_g,
-                              &multi_exp_eq::Proof::right_g,
-                              &multi_exp_eq::Proof::left_p,
-                              &multi_exp_eq::Proof::right_p}) {
-        auto proof = valid;
+    for (std::vector<ECPoint> multi_exp_eq::Proof::* const member :
+         {&multi_exp_eq::Proof::left_g,
+          &multi_exp_eq::Proof::right_g,
+          &multi_exp_eq::Proof::left_p,
+          &multi_exp_eq::Proof::right_p}) {
+        amortized::Proof proof = valid;
         (proof.equality_proof.*member).pop_back();
         EXPECT_FALSE(amortized::verify(pp, statement, proof));
     }
-    for (const auto member : {&amortized::PublicParameters::statement_count,
-                              &amortized::PublicParameters::threshold,
-                              &amortized::PublicParameters::vector_length,
-                              &amortized::PublicParameters::rounds}) {
-        auto changed = pp;
+    for (std::size_t amortized::PublicParameters::* const member :
+         {&amortized::PublicParameters::statement_count,
+          &amortized::PublicParameters::threshold,
+          &amortized::PublicParameters::vector_length,
+          &amortized::PublicParameters::rounds}) {
+        amortized::PublicParameters changed = pp;
         changed.*member = 0;
         EXPECT_FALSE(amortized::verify(changed, statement, valid));
     }
-    auto changed = pp;
+    amortized::PublicParameters changed = pp;
     changed.threshold = pp.statement_count + 1;
     EXPECT_FALSE(amortized::verify(changed, statement, valid));
     changed = pp;
@@ -303,10 +309,10 @@ TEST_F(AmortizedHomomorphismProofTest, RejectsMalformedDimensions) {
 }
 
 TEST_F(AmortizedHomomorphismProofTest, SerializationRoundTrip) {
-    const auto proof = amortized::prove(pp, statement, witness, "round-trip");
+    const amortized::Proof proof = amortized::prove(pp, statement, witness, "round-trip");
     std::stringstream stream;
     stream << proof;
-    auto decoded = empty_proof();
+    amortized::Proof decoded = empty_proof();
     stream >> decoded;
     ASSERT_TRUE(stream);
     EXPECT_EQ(decoded, proof);
@@ -316,7 +322,7 @@ TEST_F(AmortizedHomomorphismProofTest, SerializationRoundTrip) {
 TEST_F(AmortizedHomomorphismProofTest, DeserializationRejectsTruncatedProof) {
     std::stringstream stream;
     stream << amortized::prove(pp, statement, witness);
-    const auto encoded = stream.str();
+    const std::string encoded = stream.str();
     const std::size_t point_size = pp.group_ctx->get_point_byte_len();
     const std::size_t scalar_size = pp.ring_ctx->element_byte_len;
     for (const std::size_t size : {std::size_t{0}, point_size - 1,
@@ -325,7 +331,7 @@ TEST_F(AmortizedHomomorphismProofTest, DeserializationRejectsTruncatedProof) {
                                   2 * point_size + scalar_size + 1,
                                   encoded.size() - 1}) {
         std::istringstream input(encoded.substr(0, size));
-        auto decoded = empty_proof();
+        amortized::Proof decoded = empty_proof();
         input >> decoded;
         EXPECT_TRUE(input.fail()) << "Truncation size: " << size;
     }
@@ -335,13 +341,13 @@ TEST_F(AmortizedHomomorphismProofTest, DeserializationRejectsUnexpectedEmbeddedC
     std::stringstream stream;
     stream << amortized::prove(pp, statement, witness);
     std::string encoded = stream.str();
-    const auto count = std::numeric_limits<std::uint64_t>::max();
+    const std::uint64_t count = std::numeric_limits<std::uint64_t>::max();
     const std::size_t offset = 2 * pp.group_ctx->get_point_byte_len() +
                                pp.ring_ctx->element_byte_len;
     encoded.replace(offset, sizeof(count), reinterpret_cast<const char*>(&count),
                     sizeof(count));
     std::istringstream input(encoded);
-    auto decoded = empty_proof();
+    amortized::Proof decoded = empty_proof();
     input >> decoded;
     EXPECT_TRUE(input.fail());
     EXPECT_EQ(decoded.equality_proof.left_g.size(), pp.rounds);
@@ -350,8 +356,8 @@ TEST_F(AmortizedHomomorphismProofTest, DeserializationRejectsUnexpectedEmbeddedC
 TEST_F(AmortizedHomomorphismProofTest, DeserializationRejectsNonCanonicalScalars) {
     std::stringstream stream;
     stream << amortized::prove(pp, statement, witness);
-    const auto encoded = stream.str();
-    const auto modulus = pp.ring_ctx->modulus.to_bytes();
+    const std::string encoded = stream.str();
+    const std::vector<uint8_t> modulus = pp.ring_ctx->modulus.to_bytes();
     ASSERT_EQ(modulus.size(), pp.ring_ctx->element_byte_len);
     for (const std::size_t offset : {2 * pp.group_ctx->get_point_byte_len(),
                                     encoded.size() - modulus.size()}) {
@@ -359,19 +365,23 @@ TEST_F(AmortizedHomomorphismProofTest, DeserializationRejectsNonCanonicalScalars
         invalid.replace(offset, modulus.size(),
                         reinterpret_cast<const char*>(modulus.data()), modulus.size());
         std::istringstream input(invalid);
-        auto decoded = empty_proof();
+        amortized::Proof decoded = empty_proof();
         input >> decoded;
         EXPECT_TRUE(input.fail());
     }
 }
 
 TEST(AmortizedHomomorphismProofStandaloneTest, HandlesSmallCountsAndThresholdBoundaries) {
-    for (const auto& [count, threshold] :
-         {std::pair{1U, 1U}, {2U, 1U}, {4U, 1U}, {4U, 4U}, {8U, 3U}, {8U, 8U}}) {
-        const auto pp = amortized::setup(NID_X9_62_prime256v1, count, threshold);
-        const auto witness = make_witness(pp);
-        const auto statement = make_statement(pp, witness);
-        const auto proof = amortized::prove(pp, statement, witness);
+    for (const std::pair<std::size_t, std::size_t>& dimensions :
+         {std::pair<std::size_t, std::size_t>{1U, 1U}, {2U, 1U}, {4U, 1U}, {4U, 4U},
+          {8U, 3U}, {8U, 8U}}) {
+        const std::size_t count = dimensions.first;
+        const std::size_t threshold = dimensions.second;
+        const amortized::PublicParameters pp = amortized::setup(NID_X9_62_prime256v1, count,
+            threshold);
+        const amortized::Witness witness = make_witness(pp);
+        const amortized::Statement statement = make_statement(pp, witness);
+        const amortized::Proof proof = amortized::prove(pp, statement, witness);
         EXPECT_TRUE(amortized::verify(pp, statement, proof))
             << "n=" << count << ", k=" << threshold;
     }
@@ -383,29 +393,29 @@ TEST_F(AmortizedHomomorphismProofTest, RejectsInvalidSetupAndProverContracts) {
     EXPECT_DEATH(amortized::setup(pp.curve_id, 3, 1), "positive power of two");
     EXPECT_DEATH(amortized::setup(pp.curve_id, 4, 0), "threshold out of range");
     EXPECT_DEATH(amortized::setup(pp.curve_id, 4, 5), "threshold out of range");
-    auto wrong = witness;
+    amortized::Witness wrong = witness;
     wrong.y.pop_back();
     EXPECT_DEATH(amortized::prove(pp, statement, wrong), "witness length");
-    auto changed = statement;
+    amortized::Statement changed = statement;
     changed.c.pop_back();
     EXPECT_DEATH(amortized::prove(pp, changed, witness), "statement length");
-    auto shorter = pp.vector_g;
+    std::vector<ECPoint> shorter = pp.vector_g;
     shorter.pop_back();
     EXPECT_DEATH(amortized::setup(pp.group_ctx, pp.ring_ctx, 4, 2, pp.g, pp.u, shorter),
                  "parameter dimensions");
     EXPECT_DEATH(amortized::setup(nullptr, pp.ring_ctx, 4, 2, pp.g, pp.u, pp.vector_g),
                  "contexts cannot be null");
-    const auto foreign_ring = std::make_shared<Zn>(BigInt(uint64_t{17}));
+    const std::shared_ptr<Zn> foreign_ring = std::make_shared<Zn>(BigInt(uint64_t{17}));
     EXPECT_DEATH(amortized::setup(pp.group_ctx, foreign_ring, 4, 2, pp.g, pp.u, pp.vector_g),
                  "modulus mismatch");
     EXPECT_DEATH(amortized::setup(pp.group_ctx, pp.ring_ctx, 4, 2,
                                  pp.group_ctx->get_infinity(), pp.u, pp.vector_g),
                  "bases cannot be identities");
-    const auto foreign_group = std::make_shared<ECGroup>(pp.curve_id);
-    const auto foreign_g = foreign_group->get_generator();
+    const std::shared_ptr<ECGroup> foreign_group = std::make_shared<ECGroup>(pp.curve_id);
+    const ECPoint foreign_g = foreign_group->get_generator();
     EXPECT_DEATH(amortized::setup(pp.group_ctx, pp.ring_ctx, 4, 2,
                                  foreign_g, pp.u, pp.vector_g), "base context");
-    auto foreign = pp.vector_g;
+    std::vector<ECPoint> foreign = pp.vector_g;
     foreign[0] = foreign_g;
     EXPECT_DEATH(amortized::setup(pp.group_ctx, pp.ring_ctx, 4, 2, pp.g, pp.u, foreign),
                  "generator context");

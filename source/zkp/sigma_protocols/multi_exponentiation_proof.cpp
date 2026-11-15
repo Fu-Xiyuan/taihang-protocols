@@ -155,16 +155,8 @@ Proof prove(const PublicParameters& pp,
     // Bind the generator basis and public result before any folding messages.
     // The context length separates associated data from parameter encodings.
     std::ostringstream transcript;
-    transcript << "taihang/multi-exponentiation/v1"
-               << BigInt(uint64_t{context.size()});
     transcript.write(context.data(),
                      static_cast<std::streamsize>(context.size()));
-    transcript << BigInt(static_cast<uint64_t>(pp.curve_id))
-               << BigInt(uint64_t{pp.vector_length});
-    for (const ECPoint& g : pp.g) {
-        transcript << g;
-    }
-    transcript << statement.g;
 
     for (std::size_t round = 0; round < pp.rounds; ++round) {
         const std::size_t half = current_g.size() / 2;
@@ -219,16 +211,8 @@ bool verify(const PublicParameters& pp,
     }
 
     std::ostringstream transcript;
-    transcript << "taihang/multi-exponentiation/v1"
-               << BigInt(uint64_t{context.size()});
     transcript.write(context.data(),
                      static_cast<std::streamsize>(context.size()));
-    transcript << BigInt(static_cast<uint64_t>(pp.curve_id))
-               << BigInt(uint64_t{pp.vector_length});
-    for (const ECPoint& g : pp.g) {
-        transcript << g;
-    }
-    transcript << statement.g;
 
     ECPoint result = statement.g;
     std::vector<ECPoint> current_g = pp.g;

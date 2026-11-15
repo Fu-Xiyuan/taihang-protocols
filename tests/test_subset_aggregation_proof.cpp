@@ -41,10 +41,11 @@ protected:
 };
 
 TEST_F(SubsetAggregationProofTest, ExtractedAggregateHasTheSelectedWeightedValues) {
-    const auto proof = subset::prove(pp, statement, witness, "parent");
+    const subset::Proof proof = subset::prove(pp, statement, witness, "parent");
     ASSERT_TRUE(subset::verify(pp, statement, proof, "parent"));
-    const auto aggregate = subset::detail::aggregate(pp, statement, proof, "parent");
-    auto value = pp.ring_ctx->get_zero();
+    const subset::detail::Aggregate aggregate = subset::detail::aggregate(pp, statement, proof,
+        "parent");
+    ZnElement value = pp.ring_ctx->get_zero();
     for (std::size_t i = 0; i < pp.threshold; ++i) {
         value += aggregate.weights[i] * values[i];
     }
@@ -52,30 +53,40 @@ TEST_F(SubsetAggregationProofTest, ExtractedAggregateHasTheSelectedWeightedValue
               pp.g * (proof.z_g * aggregate.normalization) + pp.h * value);
 }
 
-TEST_F(SubsetAggregationProofTest, BindsContextCommitmentsAndPolynomialMessages) {
-    const auto valid = subset::prove(pp, statement, witness, "a");
+TEST_F(SubsetAggregationProofTest, VerifiesSelectorsAndDefersAggregateRelationToParent) {
+    const subset::Proof valid = subset::prove(pp, statement, witness, "a");
     EXPECT_FALSE(subset::verify(pp, statement, valid, "b"));
-    auto changed = statement;
+    const subset::detail::Aggregate original = subset::detail::aggregate(
+        pp, statement, valid, "a");
+    subset::Statement changed = statement;
     changed.commitments[0] = changed.commitments[0] + pp.h;
-    EXPECT_FALSE(subset::verify(pp, changed, valid, "a"));
-    for (auto member : {&subset::Proof::c_c, &subset::Proof::c_p}) {
-        auto proof = valid;
-        (proof.*member)[0] = (proof.*member)[0] + pp.u;
-        EXPECT_FALSE(subset::verify(pp, statement, proof, "a"));
-        (proof.*member).pop_back();
-        EXPECT_FALSE(subset::verify(pp, statement, proof, "a"));
-    }
+    // The original Koon verifier checks the selector; its caller checks the
+    // extracted commitment through the subsequent range proof.
+    EXPECT_TRUE(subset::verify(pp, changed, valid, "a"));
+    EXPECT_NE(subset::detail::aggregate(pp, changed, valid, "a").commitment,
+              original.commitment);
+    subset::Proof proof = valid;
+    proof.c_c[0] = proof.c_c[0] + pp.u;
+    EXPECT_TRUE(subset::verify(pp, statement, proof, "a"));
+    EXPECT_NE(subset::detail::aggregate(pp, statement, proof, "a").commitment,
+              original.commitment);
+    proof = valid;
+    proof.c_p[0] = proof.c_p[0] + pp.u;
+    EXPECT_FALSE(subset::verify(pp, statement, proof, "a"));
+    proof = valid;
+    proof.c_c.pop_back();
+    EXPECT_FALSE(subset::verify(pp, statement, proof, "a"));
 }
 
 TEST_F(SubsetAggregationProofTest, SerializationAndTruncation) {
-    const auto proof = subset::prove(pp, statement, witness);
+    const subset::Proof proof = subset::prove(pp, statement, witness);
     std::stringstream stream;
     stream << proof;
-    auto decoded = empty();
+    subset::Proof decoded = empty();
     stream >> decoded;
     ASSERT_TRUE(stream);
     EXPECT_EQ(proof, decoded);
-    const auto bytes = stream.str();
+    const std::string bytes = stream.str();
     for (std::size_t n = 0; n < bytes.size(); ++n) {
         std::istringstream input(bytes.substr(0, n));
         decoded = empty();

@@ -75,16 +75,21 @@ TEST_F(GrothKohlweissProofTest, SetupCreatesDistinctDeterministicBases) {
     ASSERT_EQ(pp.vector_h.size(), pp.statement_count);
     ASSERT_EQ(pp.index_g.size(), pp.threshold * pp.index_bits);
     EXPECT_EQ(pp.ring_ctx->modulus, pp.group_ctx->order);
-    const auto repeated = gk::setup(pp.curve_id, pp.statement_count, pp.threshold);
-    for (const auto member : {&gk::PublicParameters::g, &gk::PublicParameters::h,
-                              &gk::PublicParameters::u, &gk::PublicParameters::inner_product_u}) {
+    const gk::PublicParameters repeated = gk::setup(pp.curve_id, pp.statement_count, pp.threshold);
+    for (ECPoint gk::PublicParameters::* const member :
+         {&gk::PublicParameters::g,
+          &gk::PublicParameters::h,
+          &gk::PublicParameters::u,
+          &gk::PublicParameters::inner_product_u}) {
         EXPECT_EQ((pp.*member).group_ctx, pp.group_ctx.get());
         EXPECT_FALSE((pp.*member).is_at_infinity());
         EXPECT_EQ((pp.*member).to_bytes(), (repeated.*member).to_bytes());
     }
-    for (const auto member : {&gk::PublicParameters::vector_g, &gk::PublicParameters::vector_h,
-                              &gk::PublicParameters::index_g}) {
-        const auto& generators = pp.*member;
+    for (std::vector<ECPoint> gk::PublicParameters::* const member :
+         {&gk::PublicParameters::vector_g,
+          &gk::PublicParameters::vector_h,
+          &gk::PublicParameters::index_g}) {
+        const std::vector<ECPoint>& generators = pp.*member;
         for (std::size_t i = 0; i < generators.size(); ++i) {
             EXPECT_EQ(generators[i].group_ctx, pp.group_ctx.get());
             EXPECT_FALSE(generators[i].is_at_infinity());
@@ -99,7 +104,7 @@ TEST_F(GrothKohlweissProofTest, SetupCreatesDistinctDeterministicBases) {
 }
 
 TEST_F(GrothKohlweissProofTest, AcceptsValidProofAndExpectedSize) {
-    const auto proof = gk::prove(pp, statement, witness);
+    const gk::Proof proof = gk::prove(pp, statement, witness);
     EXPECT_TRUE(gk::verify(pp, statement, proof));
     EXPECT_EQ(proof.linear_binary.f.size(), pp.threshold * pp.index_bits);
     EXPECT_EQ(proof.c_c.size(), pp.index_bits);
@@ -113,8 +118,8 @@ TEST_F(GrothKohlweissProofTest, AcceptsValidProofAndExpectedSize) {
 }
 
 TEST_F(GrothKohlweissProofTest, FreshMasksProduceDifferentValidProofs) {
-    const auto first = gk::prove(pp, statement, witness);
-    const auto second = gk::prove(pp, statement, witness);
+    const gk::Proof first = gk::prove(pp, statement, witness);
+    const gk::Proof second = gk::prove(pp, statement, witness);
     EXPECT_NE(first.b, second.b);
     EXPECT_NE(first.p, second.p);
     EXPECT_NE(first, second);
@@ -123,9 +128,9 @@ TEST_F(GrothKohlweissProofTest, FreshMasksProduceDifferentValidProofs) {
 }
 
 TEST_F(GrothKohlweissProofTest, SupportsUnsortedNoncontiguousAndBoundaryIndices) {
-    auto changed = witness;
+    gk::Witness changed = witness;
     changed.indices = {7, 0, 3};
-    const auto public_input = make_statement(pp, changed);
+    const gk::Statement public_input = make_statement(pp, changed);
     EXPECT_TRUE(gk::verify(pp, public_input, gk::prove(pp, public_input, changed)));
     std::swap(changed.indices[0], changed.indices[2]);
     std::swap(changed.values[0], changed.values[2]);
@@ -134,19 +139,19 @@ TEST_F(GrothKohlweissProofTest, SupportsUnsortedNoncontiguousAndBoundaryIndices)
 }
 
 TEST_F(GrothKohlweissProofTest, AcceptsZeroAndModularBoundaryOpenings) {
-    auto changed = witness;
+    gk::Witness changed = witness;
     changed.values[0] = pp.ring_ctx->get_zero();
     changed.randomness[0] = pp.ring_ctx->get_zero();
     changed.values[1] = ZnElement(pp.ring_ctx, pp.ring_ctx->modulus - kBigIntOne);
     changed.randomness[1] = changed.values[1];
-    const auto public_input = make_statement(pp, changed);
+    const gk::Statement public_input = make_statement(pp, changed);
     EXPECT_TRUE(public_input.commitments[changed.indices[0]].is_at_infinity());
     EXPECT_TRUE(gk::verify(pp, public_input, gk::prove(pp, public_input, changed)));
 }
 
 TEST_F(GrothKohlweissProofTest, RejectsWrongValuesAndRandomness) {
     for (std::size_t i = 0; i < pp.threshold; ++i) {
-        auto wrong = witness;
+        gk::Witness wrong = witness;
         wrong.values[i] += pp.ring_ctx->get_one();
         EXPECT_FALSE(gk::verify(pp, statement, gk::prove(pp, statement, wrong)));
         wrong = witness;
@@ -156,19 +161,19 @@ TEST_F(GrothKohlweissProofTest, RejectsWrongValuesAndRandomness) {
 }
 
 TEST_F(GrothKohlweissProofTest, RejectsUnknownOpeningAtSelectedIndex) {
-    auto wrong = witness;
+    gk::Witness wrong = witness;
     wrong.indices[0] = 0;
     EXPECT_FALSE(gk::verify(pp, statement, gk::prove(pp, statement, wrong)));
 }
 
 TEST_F(GrothKohlweissProofTest, BindsEveryPublicCommitmentAndItsOrder) {
-    const auto proof = gk::prove(pp, statement, witness);
+    const gk::Proof proof = gk::prove(pp, statement, witness);
     for (std::size_t j = 0; j < pp.statement_count; ++j) {
-        auto changed = statement;
+        gk::Statement changed = statement;
         changed.commitments[j] = changed.commitments[j] + pp.h;
         EXPECT_FALSE(gk::verify(pp, changed, proof));
     }
-    auto changed = statement;
+    gk::Statement changed = statement;
     std::swap(changed.commitments[0], changed.commitments[1]);
     EXPECT_FALSE(gk::verify(pp, changed, proof));
     changed = statement;
@@ -177,108 +182,132 @@ TEST_F(GrothKohlweissProofTest, BindsEveryPublicCommitmentAndItsOrder) {
 }
 
 TEST_F(GrothKohlweissProofTest, BindsAssociatedContext) {
-    const auto proof = gk::prove(pp, statement, witness, "session-a");
+    const gk::Proof proof = gk::prove(pp, statement, witness, "session-a");
     EXPECT_TRUE(gk::verify(pp, statement, proof, "session-a"));
     EXPECT_FALSE(gk::verify(pp, statement, proof, "session-b"));
 }
 
 TEST_F(GrothKohlweissProofTest, BindsScalarBasesAndAllGeneratorOrders) {
-    const auto proof = gk::prove(pp, statement, witness);
-    for (const auto member : {&gk::PublicParameters::g, &gk::PublicParameters::h,
-                              &gk::PublicParameters::u, &gk::PublicParameters::inner_product_u}) {
-        auto changed = pp;
+    const gk::Proof proof = gk::prove(pp, statement, witness);
+    for (ECPoint gk::PublicParameters::* const member :
+         {&gk::PublicParameters::g,
+          &gk::PublicParameters::h,
+          &gk::PublicParameters::u,
+          &gk::PublicParameters::inner_product_u}) {
+        gk::PublicParameters changed = pp;
         changed.*member = changed.*member + pp.vector_g[0];
         EXPECT_FALSE(gk::verify(changed, statement, proof));
     }
-    for (const auto member : {&gk::PublicParameters::vector_g, &gk::PublicParameters::vector_h,
-                              &gk::PublicParameters::index_g}) {
-        auto changed = pp;
+    for (std::vector<ECPoint> gk::PublicParameters::* const member :
+         {&gk::PublicParameters::vector_g,
+          &gk::PublicParameters::vector_h,
+          &gk::PublicParameters::index_g}) {
+        gk::PublicParameters changed = pp;
         std::swap((changed.*member)[0], (changed.*member)[1]);
         EXPECT_FALSE(gk::verify(changed, statement, proof));
     }
 }
 
 TEST_F(GrothKohlweissProofTest, RejectsTamperedCommitmentsAndOuterResponses) {
-    const auto valid = gk::prove(pp, statement, witness);
-    for (const auto member : {&gk::Proof::b, &gk::Proof::p}) {
-        auto proof = valid;
+    const gk::Proof valid = gk::prove(pp, statement, witness);
+    for (ECPoint gk::Proof::* const member :
+         {&gk::Proof::b,
+          &gk::Proof::p}) {
+        gk::Proof proof = valid;
         proof.*member = proof.*member + pp.u;
         EXPECT_FALSE(gk::verify(pp, statement, proof));
     }
-    for (const auto member : {&gk::Proof::c_c, &gk::Proof::c_p}) {
+    for (std::vector<ECPoint> gk::Proof::* const member :
+         {&gk::Proof::c_c,
+          &gk::Proof::c_p}) {
         for (std::size_t degree = 0; degree < pp.index_bits; ++degree) {
-            auto proof = valid;
+            gk::Proof proof = valid;
             (proof.*member)[degree] = (proof.*member)[degree] + pp.u;
             EXPECT_FALSE(gk::verify(pp, statement, proof));
         }
     }
-    for (const auto member : {&gk::Proof::z_g, &gk::Proof::z_h, &gk::Proof::z_p}) {
-        auto proof = valid;
+    for (ZnElement gk::Proof::* const member :
+         {&gk::Proof::z_g,
+          &gk::Proof::z_h,
+          &gk::Proof::z_p}) {
+        gk::Proof proof = valid;
         proof.*member += pp.ring_ctx->get_one();
         EXPECT_FALSE(gk::verify(pp, statement, proof));
     }
 }
 
-TEST_F(GrothKohlweissProofTest, RejectsPolynomialCommitmentChangeWithAdjustedBlinding) {
-    auto proof = gk::prove(pp, statement, witness);
-    // Changing C_p,0 by u would preserve the selection equation if x were
-    // independent of the polynomial messages and z_p were increased by one.
+TEST_F(GrothKohlweissProofTest, PreservesOriginalPolynomialCommitmentRerandomization) {
+    gk::Proof proof = gk::prove(pp, statement, witness);
+    // The original x precedes the polynomial commitments. Reblinding C_p,0
+    // and its response together preserves the same selector relation.
     proof.c_p[0] = proof.c_p[0] + pp.u;
     proof.z_p += pp.ring_ctx->get_one();
-    EXPECT_FALSE(gk::verify(pp, statement, proof));
+    EXPECT_TRUE(gk::verify(pp, statement, proof));
 }
 
 TEST_F(GrothKohlweissProofTest, RejectsTamperedLinearBinaryProof) {
-    const auto valid = gk::prove(pp, statement, witness);
-    for (const auto member : {&linear_binary::Proof::a, &linear_binary::Proof::c,
-                              &linear_binary::Proof::d}) {
-        auto proof = valid;
+    const gk::Proof valid = gk::prove(pp, statement, witness);
+    for (ECPoint linear_binary::Proof::* const member :
+         {&linear_binary::Proof::a,
+          &linear_binary::Proof::c,
+          &linear_binary::Proof::d}) {
+        gk::Proof proof = valid;
         proof.linear_binary.*member = proof.linear_binary.*member + pp.u;
         EXPECT_FALSE(gk::verify(pp, statement, proof));
     }
-    for (const auto member : {&linear_binary::Proof::z_a, &linear_binary::Proof::z_c}) {
-        auto proof = valid;
+    for (ZnElement linear_binary::Proof::* const member :
+         {&linear_binary::Proof::z_a,
+          &linear_binary::Proof::z_c}) {
+        gk::Proof proof = valid;
         proof.linear_binary.*member += pp.ring_ctx->get_one();
         EXPECT_FALSE(gk::verify(pp, statement, proof));
     }
     for (std::size_t i = 0; i < pp.index_g.size(); ++i) {
-        auto proof = valid;
+        gk::Proof proof = valid;
         proof.linear_binary.f[i] += pp.ring_ctx->get_one();
         EXPECT_FALSE(gk::verify(pp, statement, proof));
     }
 }
 
 TEST_F(GrothKohlweissProofTest, RejectsTamperedLogarithmicBinaryProof) {
-    const auto valid = gk::prove(pp, statement, witness);
-    for (const auto member : {&logarithmic_binary::Proof::a, &logarithmic_binary::Proof::t1,
-                              &logarithmic_binary::Proof::t2}) {
-        auto proof = valid;
+    const gk::Proof valid = gk::prove(pp, statement, witness);
+    for (ECPoint logarithmic_binary::Proof::* const member :
+         {&logarithmic_binary::Proof::a,
+          &logarithmic_binary::Proof::t1,
+          &logarithmic_binary::Proof::t2}) {
+        gk::Proof proof = valid;
         proof.logarithmic_binary.*member = proof.logarithmic_binary.*member + pp.u;
         EXPECT_FALSE(gk::verify(pp, statement, proof));
     }
-    for (const auto member : {&logarithmic_binary::Proof::t, &logarithmic_binary::Proof::tau,
-                              &logarithmic_binary::Proof::mu}) {
-        auto proof = valid;
+    for (ZnElement logarithmic_binary::Proof::* const member :
+         {&logarithmic_binary::Proof::t,
+          &logarithmic_binary::Proof::tau,
+          &logarithmic_binary::Proof::mu}) {
+        gk::Proof proof = valid;
         proof.logarithmic_binary.*member += pp.ring_ctx->get_one();
         EXPECT_FALSE(gk::verify(pp, statement, proof));
     }
-    for (const auto member : {&inner_product::Proof::left, &inner_product::Proof::right}) {
-        auto proof = valid;
+    for (std::vector<ECPoint> inner_product::Proof::* const member :
+         {&inner_product::Proof::left,
+          &inner_product::Proof::right}) {
+        gk::Proof proof = valid;
         (proof.logarithmic_binary.inner_product.*member)[0] =
             (proof.logarithmic_binary.inner_product.*member)[0] + pp.u;
         EXPECT_FALSE(gk::verify(pp, statement, proof));
     }
-    for (const auto member : {&inner_product::Proof::a, &inner_product::Proof::b}) {
-        auto proof = valid;
+    for (ZnElement inner_product::Proof::* const member :
+         {&inner_product::Proof::a,
+          &inner_product::Proof::b}) {
+        gk::Proof proof = valid;
         proof.logarithmic_binary.inner_product.*member += pp.ring_ctx->get_one();
         EXPECT_FALSE(gk::verify(pp, statement, proof));
     }
 }
 
 TEST_F(GrothKohlweissProofTest, RejectsSplicedSubproofFromAnotherExecution) {
-    const auto first = gk::prove(pp, statement, witness);
-    const auto second = gk::prove(pp, statement, witness);
-    auto proof = first;
+    const gk::Proof first = gk::prove(pp, statement, witness);
+    const gk::Proof second = gk::prove(pp, statement, witness);
+    gk::Proof proof = first;
     proof.linear_binary = second.linear_binary;
     EXPECT_FALSE(gk::verify(pp, statement, proof));
     proof = first;
@@ -287,28 +316,32 @@ TEST_F(GrothKohlweissProofTest, RejectsSplicedSubproofFromAnotherExecution) {
 }
 
 TEST_F(GrothKohlweissProofTest, RejectsMalformedProofAndStatementDimensions) {
-    const auto valid = gk::prove(pp, statement, witness);
-    auto changed = statement;
+    const gk::Proof valid = gk::prove(pp, statement, witness);
+    gk::Statement changed = statement;
     changed.commitments.pop_back();
     EXPECT_FALSE(gk::verify(pp, changed, valid));
     changed = statement;
     changed.commitments.push_back(pp.u);
     EXPECT_FALSE(gk::verify(pp, changed, valid));
-    for (const auto member : {&gk::Proof::c_c, &gk::Proof::c_p}) {
-        auto proof = valid;
+    for (std::vector<ECPoint> gk::Proof::* const member :
+         {&gk::Proof::c_c,
+          &gk::Proof::c_p}) {
+        gk::Proof proof = valid;
         (proof.*member).pop_back();
         EXPECT_FALSE(gk::verify(pp, statement, proof));
         proof = valid;
         (proof.*member).push_back(pp.u);
         EXPECT_FALSE(gk::verify(pp, statement, proof));
     }
-    auto proof = valid;
+    gk::Proof proof = valid;
     proof.linear_binary.f.pop_back();
     EXPECT_FALSE(gk::verify(pp, statement, proof));
     proof = valid;
     proof.linear_binary.f.push_back(pp.ring_ctx->get_zero());
     EXPECT_FALSE(gk::verify(pp, statement, proof));
-    for (const auto member : {&inner_product::Proof::left, &inner_product::Proof::right}) {
+    for (std::vector<ECPoint> inner_product::Proof::* const member :
+         {&inner_product::Proof::left,
+          &inner_product::Proof::right}) {
         proof = valid;
         (proof.logarithmic_binary.inner_product.*member).pop_back();
         EXPECT_FALSE(gk::verify(pp, statement, proof));
@@ -316,21 +349,25 @@ TEST_F(GrothKohlweissProofTest, RejectsMalformedProofAndStatementDimensions) {
 }
 
 TEST_F(GrothKohlweissProofTest, RejectsMalformedParameterDimensions) {
-    const auto proof = gk::prove(pp, statement, witness);
-    for (const auto member : {&gk::PublicParameters::statement_count,
-                              &gk::PublicParameters::threshold, &gk::PublicParameters::index_bits}) {
-        auto changed = pp;
+    const gk::Proof proof = gk::prove(pp, statement, witness);
+    for (std::size_t gk::PublicParameters::* const member :
+         {&gk::PublicParameters::statement_count,
+          &gk::PublicParameters::threshold,
+          &gk::PublicParameters::index_bits}) {
+        gk::PublicParameters changed = pp;
         changed.*member = 0;
         EXPECT_FALSE(gk::verify(changed, statement, proof));
     }
-    auto changed = pp;
+    gk::PublicParameters changed = pp;
     changed.threshold = pp.statement_count + 1;
     EXPECT_FALSE(gk::verify(changed, statement, proof));
     changed = pp;
     changed.threshold = 2;
     EXPECT_FALSE(gk::verify(changed, statement, proof));
-    for (const auto member : {&gk::PublicParameters::vector_g, &gk::PublicParameters::vector_h,
-                              &gk::PublicParameters::index_g}) {
+    for (std::vector<ECPoint> gk::PublicParameters::* const member :
+         {&gk::PublicParameters::vector_g,
+          &gk::PublicParameters::vector_h,
+          &gk::PublicParameters::index_g}) {
         changed = pp;
         (changed.*member).pop_back();
         EXPECT_FALSE(gk::verify(changed, statement, proof));
@@ -338,10 +375,10 @@ TEST_F(GrothKohlweissProofTest, RejectsMalformedParameterDimensions) {
 }
 
 TEST_F(GrothKohlweissProofTest, SerializationRoundTrip) {
-    const auto proof = gk::prove(pp, statement, witness, "round-trip");
+    const gk::Proof proof = gk::prove(pp, statement, witness, "round-trip");
     std::stringstream stream;
     stream << proof;
-    auto decoded = empty_proof();
+    gk::Proof decoded = empty_proof();
     stream >> decoded;
     ASSERT_TRUE(stream);
     EXPECT_EQ(decoded, proof);
@@ -351,11 +388,11 @@ TEST_F(GrothKohlweissProofTest, SerializationRoundTrip) {
 TEST_F(GrothKohlweissProofTest, DeserializationRejectsTruncationAcrossEveryField) {
     std::stringstream stream;
     stream << gk::prove(pp, statement, witness);
-    const auto encoded = stream.str();
+    const std::string encoded = stream.str();
     // Cutting every byte boundary covers both nested proof encodings too.
     for (std::size_t size = 0; size < encoded.size(); ++size) {
         std::istringstream input(encoded.substr(0, size));
-        auto decoded = empty_proof();
+        gk::Proof decoded = empty_proof();
         input >> decoded;
         ASSERT_TRUE(input.fail()) << "Truncation size: " << size;
     }
@@ -364,7 +401,7 @@ TEST_F(GrothKohlweissProofTest, DeserializationRejectsTruncationAcrossEveryField
 TEST_F(GrothKohlweissProofTest, DeserializationRejectsAllUnexpectedVectorCounts) {
     std::stringstream stream;
     stream << gk::prove(pp, statement, witness);
-    const auto encoded = stream.str();
+    const std::string encoded = stream.str();
     const std::size_t point_size = pp.group_ctx->get_point_byte_len();
     const std::size_t scalar_size = pp.ring_ctx->element_byte_len;
     const std::size_t linear_count = 5 * point_size;
@@ -372,13 +409,14 @@ TEST_F(GrothKohlweissProofTest, DeserializationRejectsAllUnexpectedVectorCounts)
         (pp.index_g.size() + 2) * scalar_size;
     const std::size_t inner_count = polynomial_count + sizeof(std::uint64_t) +
         (2 * pp.index_bits + 3) * point_size + 6 * scalar_size;
-    for (const auto offset : {linear_count, polynomial_count, inner_count}) {
+    for (const std::size_t offset : {linear_count, polynomial_count, inner_count}) {
         for (const std::uint64_t count : {std::uint64_t{0},
                                           std::numeric_limits<std::uint64_t>::max()}) {
             std::string invalid = encoded;
-            invalid.replace(offset, sizeof(count), reinterpret_cast<const char*>(&count), sizeof(count));
+            invalid.replace(offset, sizeof(count), reinterpret_cast<const char*>(&count),
+                sizeof(count));
             std::istringstream input(invalid);
-            auto decoded = empty_proof();
+            gk::Proof decoded = empty_proof();
             input >> decoded;
             EXPECT_TRUE(input.fail());
             EXPECT_EQ(decoded.c_c.size(), pp.index_bits);
@@ -390,31 +428,34 @@ TEST_F(GrothKohlweissProofTest, DeserializationRejectsAllUnexpectedVectorCounts)
 TEST_F(GrothKohlweissProofTest, DeserializationRejectsNonCanonicalResponseScalars) {
     std::stringstream stream;
     stream << gk::prove(pp, statement, witness);
-    const auto encoded = stream.str();
-    const auto modulus = pp.ring_ctx->modulus.to_bytes();
+    const std::string encoded = stream.str();
+    const std::vector<uint8_t> modulus = pp.ring_ctx->modulus.to_bytes();
     const std::size_t point_size = pp.group_ctx->get_point_byte_len();
     const std::size_t scalar_size = pp.ring_ctx->element_byte_len;
     const std::size_t linear_start = 5 * point_size + sizeof(std::uint64_t);
     const std::size_t outer_start = linear_start + (pp.index_g.size() + 2) * scalar_size +
         sizeof(std::uint64_t) + 2 * pp.index_bits * point_size;
-    for (const auto offset : {linear_start, outer_start, outer_start + scalar_size,
+    for (const std::size_t offset : {linear_start, outer_start, outer_start + scalar_size,
                               outer_start + 2 * scalar_size, encoded.size() - scalar_size}) {
         std::string invalid = encoded;
         invalid.replace(offset, modulus.size(),
                         reinterpret_cast<const char*>(modulus.data()), modulus.size());
         std::istringstream input(invalid);
-        auto decoded = empty_proof();
+        gk::Proof decoded = empty_proof();
         input >> decoded;
         EXPECT_TRUE(input.fail());
     }
 }
 
 TEST(GrothKohlweissProofStandaloneTest, HandlesSmallCountsAndThresholdBoundaries) {
-    for (const auto& [count, threshold] :
-         {std::pair{2U, 1U}, {2U, 2U}, {4U, 1U}, {4U, 4U}, {8U, 1U}, {8U, 8U}, {16U, 5U}}) {
-        const auto pp = gk::setup(NID_X9_62_prime256v1, count, threshold);
-        const auto witness = make_witness(pp);
-        const auto statement = make_statement(pp, witness);
+    for (const std::pair<std::size_t, std::size_t>& dimensions :
+         {std::pair<std::size_t, std::size_t>{2U, 1U}, {2U, 2U}, {4U, 1U}, {4U, 4U},
+          {8U, 1U}, {8U, 8U}, {16U, 5U}}) {
+        const std::size_t count = dimensions.first;
+        const std::size_t threshold = dimensions.second;
+        const gk::PublicParameters pp = gk::setup(NID_X9_62_prime256v1, count, threshold);
+        const gk::Witness witness = make_witness(pp);
+        const gk::Statement statement = make_statement(pp, witness);
         EXPECT_TRUE(gk::verify(pp, statement, gk::prove(pp, statement, witness)))
             << "n=" << count << ", k=" << threshold;
     }
@@ -427,7 +468,7 @@ TEST_F(GrothKohlweissProofTest, RejectsInvalidSetupAndWitnessContracts) {
     }
     EXPECT_DEATH(gk::setup(pp.curve_id, 8, 0), "threshold out of range");
     EXPECT_DEATH(gk::setup(pp.curve_id, 8, 9), "threshold out of range");
-    auto wrong = witness;
+    gk::Witness wrong = witness;
     wrong.indices.pop_back();
     EXPECT_DEATH(gk::prove(pp, statement, wrong), "witness length");
     wrong = witness;
@@ -442,7 +483,7 @@ TEST_F(GrothKohlweissProofTest, RejectsInvalidSetupAndWitnessContracts) {
     wrong = witness;
     wrong.indices[0] = wrong.indices[1];
     EXPECT_DEATH(gk::prove(pp, statement, wrong), "indices must be distinct");
-    auto changed = statement;
+    gk::Statement changed = statement;
     changed.commitments.pop_back();
     EXPECT_DEATH(gk::prove(pp, changed, witness), "statement length");
 }

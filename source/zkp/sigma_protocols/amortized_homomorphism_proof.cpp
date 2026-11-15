@@ -52,21 +52,11 @@ bool valid_dimensions(const PublicParameters& pp) {
 }
 
 /** Bind the entire public input before deriving the batching challenge. */
-std::string initial_transcript(const PublicParameters& pp,
-                               const Statement& statement,
+std::string initial_transcript(const Statement& statement,
                                std::string_view context) {
     std::ostringstream transcript;
-    transcript << "taihang/amortized-homomorphism/v1"
-               << BigInt(uint64_t{context.size()});
     transcript.write(context.data(),
                      static_cast<std::streamsize>(context.size()));
-    transcript << BigInt(static_cast<uint64_t>(pp.curve_id))
-               << BigInt(uint64_t{pp.statement_count})
-               << BigInt(uint64_t{pp.threshold})
-               << pp.g << pp.u;
-    for (const ECPoint& generator : pp.vector_g) {
-        transcript << generator;
-    }
     transcript << statement.p;
     for (const ECPoint& c : statement.c) {
         transcript << c;
@@ -76,8 +66,8 @@ std::string initial_transcript(const PublicParameters& pp,
 
 /** Batch c_j*(1 + sum_i a_i*j^i) = g*b_j with weights rho^(j-1). */
 std::vector<ECPoint> batched_bases(const PublicParameters& pp,
-                                  const Statement& statement,
-                                  const ScalarVector& rho_power) {
+                                   const Statement& statement,
+                                   const ScalarVector& rho_power) {
     const std::size_t n = pp.statement_count;
     const std::size_t degree = n - pp.threshold;
     const ZnElement zero = pp.ring_ctx->get_zero();
@@ -213,7 +203,7 @@ Proof prove(const PublicParameters& pp,
                    "amortized-homomorphism witness length mismatch");
 
     std::ostringstream transcript;
-    transcript << initial_transcript(pp, statement, context);
+    transcript << initial_transcript(statement, context);
     ZnElement rho = hash_to_zn(transcript.str(), *pp.ring_ctx);
     if (rho.value.is_zero()) {
         rho = pp.ring_ctx->get_one();
@@ -231,7 +221,8 @@ Proof prove(const PublicParameters& pp,
         ZnElement(pp.ring_ctx),
         {}
     };
-    transcript << proof.a_p << proof.a_f;
+    transcript.str(std::string{});
+    transcript << context << proof.a_p << proof.a_f;
     ZnElement e = hash_to_zn(transcript.str(), *pp.ring_ctx);
     if (e.value.is_zero()) {
         e = pp.ring_ctx->get_one();
@@ -242,18 +233,18 @@ Proof prove(const PublicParameters& pp,
         z[i] = alpha[i] + e * witness.y[i];
     }
     proof.f = beta + e * witness.r;
-    transcript << proof.f;
 
     // For a valid witness, <bases,y> = -sum_j rho^(j-1)*c_j.
     // Using the supplied witness here lets the verifier reject invalid openings.
-    const auto equality_pp = multi_exponentiation_equality::setup(
+    const multi_exponentiation_equality::PublicParameters equality_pp =
+        multi_exponentiation_equality::setup(
         pp.group_ctx, pp.ring_ctx, bases, pp.vector_g);
     const multi_exponentiation_equality::Statement equality_statement{
         proof.a_f + ec_point_msm(bases, witness.y) * e,
         statement.p * e + proof.a_p - pp.u * proof.f
     };
     proof.equality_proof = multi_exponentiation_equality::prove(
-        equality_pp, equality_statement, {std::move(z)}, transcript.str());
+        equality_pp, equality_statement, {std::move(z)}, context);
     return proof;
 }
 
@@ -270,7 +261,7 @@ bool verify(const PublicParameters& pp,
     }
 
     std::ostringstream transcript;
-    transcript << initial_transcript(pp, statement, context);
+    transcript << initial_transcript(statement, context);
     ZnElement rho = hash_to_zn(transcript.str(), *pp.ring_ctx);
     if (rho.value.is_zero()) {
         rho = pp.ring_ctx->get_one();
@@ -279,22 +270,23 @@ bool verify(const PublicParameters& pp,
     const std::vector<ECPoint> bases = batched_bases(pp, statement, rho_power);
     const ECPoint target = ec_point_msm(statement.c, rho_power).neg();
 
-    transcript << proof.a_p << proof.a_f;
+    transcript.str(std::string{});
+    transcript << context << proof.a_p << proof.a_f;
     ZnElement e = hash_to_zn(transcript.str(), *pp.ring_ctx);
     if (e.value.is_zero()) {
         e = pp.ring_ctx->get_one();
     }
-    transcript << proof.f;
 
     // Both relations must open to the same masked vector z = alpha + e*y.
-    const auto equality_pp = multi_exponentiation_equality::setup(
+    const multi_exponentiation_equality::PublicParameters equality_pp =
+        multi_exponentiation_equality::setup(
         pp.group_ctx, pp.ring_ctx, bases, pp.vector_g);
     const multi_exponentiation_equality::Statement equality_statement{
         proof.a_f + target * e,
         statement.p * e + proof.a_p - pp.u * proof.f
     };
     return multi_exponentiation_equality::verify(
-        equality_pp, equality_statement, proof.equality_proof, transcript.str());
+        equality_pp, equality_statement, proof.equality_proof, context);
 }
 
 } // namespace taihang::zkp::nizk::amortized_homomorphism

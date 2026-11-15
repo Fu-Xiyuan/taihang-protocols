@@ -72,27 +72,26 @@ ZnElement nonzero_challenge(const std::string& transcript, const Zn& ring) {
     return result;
 }
 
-/** Bind the complete public list and bases before the first prover messages. */
-std::string initial_transcript(const PublicParameters& pp,
-                               const Statement& statement,
-                               std::string_view context) {
+ZnElement selection_challenge(const PublicParameters& pp,
+                              const ECPoint& a,
+                              const ECPoint& c,
+                              const ECPoint& d,
+                              std::string_view context) {
     std::ostringstream transcript;
-    transcript << "taihang/k-out-of-n/groth-kohlweiss/v1"
-               << BigInt(uint64_t{context.size()});
-    transcript.write(context.data(), static_cast<std::streamsize>(context.size()));
-    transcript << BigInt(static_cast<uint64_t>(pp.curve_id))
-               << BigInt(uint64_t{pp.statement_count})
-               << BigInt(uint64_t{pp.threshold})
-               << pp.g << pp.h << pp.u << pp.inner_product_u;
-    for (const auto* generators : {&pp.vector_g, &pp.vector_h, &pp.index_g}) {
-        for (const ECPoint& generator : *generators) {
-            transcript << generator;
-        }
-    }
-    for (const ECPoint& commitment : statement.commitments) {
-        transcript << commitment;
-    }
-    return transcript.str();
+    transcript << context << a << c << d;
+    return nonzero_challenge(transcript.str(), *pp.ring_ctx);
+}
+
+ZnElement aggregation_challenge(const PublicParameters& pp,
+                                const ECPoint& a,
+                                const ECPoint& b,
+                                const ECPoint& c,
+                                const ECPoint& d,
+                                const ECPoint& p,
+                                std::string_view context) {
+    std::ostringstream transcript;
+    transcript << context << a << b << c << d << p;
+    return nonzero_challenge(transcript.str(), *pp.ring_ctx);
 }
 
 logarithmic_binary::PublicParameters logarithmic_parameters(const PublicParameters& pp) {
@@ -123,15 +122,6 @@ ScalarVector selection_polynomial(const PublicParameters& pp,
         coefficients[0] *= constant;
     }
     return coefficients;
-}
-
-/** Responses bind the logarithmic selection proof to the entire outer protocol. */
-void append_responses(std::ostringstream& transcript, const Proof& proof) {
-    for (const ZnElement& f : proof.linear_binary.f) {
-        transcript << f;
-    }
-    transcript << proof.linear_binary.z_a << proof.linear_binary.z_c
-               << proof.z_g << proof.z_h << proof.z_p;
 }
 
 } // namespace
@@ -209,7 +199,7 @@ std::istream& operator>>(std::istream& is, Proof& proof) {
         is.setstate(std::ios::failbit);
         return is;
     }
-    for (auto* points : {&proof.c_c, &proof.c_p}) {
+    for (std::vector<ECPoint>* points : {&proof.c_c, &proof.c_p}) {
         for (ECPoint& point : *points) {
             if (!(is >> point)) {
                 return is;
@@ -266,14 +256,15 @@ Proof prove(const PublicParameters& pp,
          ZnElement(pp.ring_ctx), ZnElement(pp.ring_ctx), ZnElement(pp.ring_ctx),
          {{}, {}, ZnElement(pp.ring_ctx), ZnElement(pp.ring_ctx)}}
     };
-    const auto linear_pp = linear_binary::setup(pp.group_ctx, pp.ring_ctx, pp.u, pp.index_g);
+    const linear_binary::PublicParameters linear_pp = linear_binary::setup(pp.group_ctx,
+        pp.ring_ctx, pp.u, pp.index_g);
     const linear_binary::Witness linear_witness{bits, r_b};
-    auto state = linear_binary::detail::commit(linear_pp, linear_witness);
+    linear_binary::detail::ProverState state = linear_binary::detail::commit(linear_pp,
+        linear_witness);
 
-    std::ostringstream transcript;
-    transcript << initial_transcript(pp, statement, context)
-               << proof.b << proof.p << state.a << state.c << state.d;
-    const ZnElement e = nonzero_challenge(transcript.str(), *pp.ring_ctx);
+    const ZnElement x = selection_challenge(pp, state.a, state.c, state.d, context);
+    const ZnElement e = aggregation_challenge(
+        pp, state.a, proof.b, state.c, state.d, proof.p, context);
     const ScalarVector e_power = powers(pp.threshold, e);
 
     // Accumulate the lower coefficients by degree and public index, avoiding
@@ -282,7 +273,7 @@ Proof prove(const PublicParameters& pp,
     std::vector<ScalarVector> unweighted(pp.index_bits, ScalarVector(pp.statement_count, zero));
     for (std::size_t i = 0; i < pp.threshold; ++i) {
         for (std::size_t j = 0; j < pp.statement_count; ++j) {
-            const auto polynomial = selection_polynomial(pp, bits, state.alpha, i, j);
+            const ScalarVector polynomial = selection_polynomial(pp, bits, state.alpha, i, j);
             for (std::size_t degree = 0; degree < pp.index_bits; ++degree) {
                 weighted[degree][j] += e_power[i] * polynomial[degree];
                 unweighted[degree][j] += polynomial[degree];
@@ -301,11 +292,9 @@ Proof prove(const PublicParameters& pp,
                             ec_point_msm(pp.g, rho[degree], pp.h, beta[degree]);
         proof.c_p[degree] = ec_point_msm(selection_bases, unweighted[degree]) +
                             pp.u * alpha[degree];
-        transcript << proof.c_c[degree] << proof.c_p[degree];
     }
 
-    // Fix all polynomial commitments before x; the linear proof shares x.
-    const ZnElement x = nonzero_challenge(transcript.str(), *pp.ring_ctx);
+    // Preserve the original selector challenge fixed before coefficient messages.
     const ScalarVector x_power = powers(pp.index_bits + 1, x);
     proof.linear_binary = linear_binary::detail::respond(
         linear_pp, linear_witness, std::move(state), x);
@@ -323,12 +312,11 @@ Proof prove(const PublicParameters& pp,
         proof.z_h -= beta[degree] * x_power[degree];
         proof.z_p += alpha[degree] * x_power[degree];
     }
-    append_responses(transcript, proof);
 
     // Binary selection entries prevent repeated indices from counting twice.
-    const auto log_pp = logarithmic_parameters(pp);
+    const logarithmic_binary::PublicParameters log_pp = logarithmic_parameters(pp);
     proof.logarithmic_binary = logarithmic_binary::prove(
-        log_pp, {proof.p}, {std::move(selection), std::move(complement), r_p}, transcript.str());
+        log_pp, {proof.p}, {std::move(selection), std::move(complement), r_p}, context);
     return proof;
 }
 
@@ -343,19 +331,16 @@ bool verify(const PublicParameters& pp,
         proof.logarithmic_binary.inner_product.right.size() != pp.index_bits) {
         return false;
     }
-    std::ostringstream transcript;
-    transcript << initial_transcript(pp, statement, context)
-               << proof.b << proof.p << proof.linear_binary.a
-               << proof.linear_binary.c << proof.linear_binary.d;
-    const ZnElement e = nonzero_challenge(transcript.str(), *pp.ring_ctx);
+    const ZnElement e = aggregation_challenge(pp, proof.linear_binary.a,
+        proof.b, proof.linear_binary.c, proof.linear_binary.d, proof.p, context);
     const ScalarVector e_power = powers(pp.threshold, e);
-    for (std::size_t degree = 0; degree < pp.index_bits; ++degree) {
-        transcript << proof.c_c[degree] << proof.c_p[degree];
-    }
-    const ZnElement x = nonzero_challenge(transcript.str(), *pp.ring_ctx);
+    const ZnElement x = selection_challenge(pp, proof.linear_binary.a,
+        proof.linear_binary.c, proof.linear_binary.d, context);
     const ScalarVector x_power = powers(pp.index_bits + 1, x);
-    const auto linear_pp = linear_binary::setup(pp.group_ctx, pp.ring_ctx, pp.u, pp.index_g);
-    if (!linear_binary::detail::verify_with_challenge(linear_pp, {proof.b}, proof.linear_binary, x)) {
+    const linear_binary::PublicParameters linear_pp = linear_binary::setup(pp.group_ctx,
+        pp.ring_ctx, pp.u, pp.index_g);
+    if (!linear_binary::detail::verify_with_challenge(linear_pp, {proof.b}, proof.linear_binary,
+        x)) {
         return false;
     }
 
@@ -401,9 +386,8 @@ bool verify(const PublicParameters& pp,
     if (selection != pp.u * proof.z_p) {
         return false;
     }
-    append_responses(transcript, proof);
-    const auto log_pp = logarithmic_parameters(pp);
-    return logarithmic_binary::verify(log_pp, {proof.p}, proof.logarithmic_binary, transcript.str());
+    const logarithmic_binary::PublicParameters log_pp = logarithmic_parameters(pp);
+    return logarithmic_binary::verify(log_pp, {proof.p}, proof.logarithmic_binary, context);
 }
 
 } // namespace taihang::zkp::k_out_of_n::groth_kohlweiss

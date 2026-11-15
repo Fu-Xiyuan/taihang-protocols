@@ -101,8 +101,10 @@ struct Aggregate {
     ZnElement normalization;
 };
 /** @note Call verify() first when processing untrusted proof data. */
-Aggregate aggregate(const PublicParameters& pp, const Statement& statement,
-                     const Proof& proof, std::string_view context = {});
+Aggregate aggregate(const PublicParameters& pp,
+                    const Statement& statement,
+                    const Proof& proof,
+                    std::string_view context = {});
 } // namespace detail
 
 } // namespace taihang::zkp::nizk::subset_aggregation

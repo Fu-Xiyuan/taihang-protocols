@@ -5,6 +5,8 @@
 
 #include <taihang/zkp/apgc/inactive_participant_proof.hpp>
 
+#include <openssl/obj_mac.h>
+
 #include <istream>
 #include <ostream>
 #include <sstream>
@@ -15,34 +17,95 @@
 namespace taihang::zkp::apgc::inactive_participant {
 namespace {
 
-namespace common = taihang::zkp::apgc::ciphertext_homomorphism::detail;
+std::size_t folding_rounds(std::size_t length) {
+    std::size_t rounds = 0;
+    for (; length > 1; length /= 2) {
+        ++rounds;
+    }
+    return rounds;
+}
+
+std::vector<ZnElement> powers(std::size_t length, const ZnElement& base) {
+    std::vector<ZnElement> result(length, base.ring_ctx->get_one());
+    for (std::size_t i = 1; i < length; ++i) {
+        result[i] = result[i - 1] * base;
+    }
+    return result;
+}
+
+ZnElement dot(const std::vector<ZnElement>& a, const std::vector<ZnElement>& b) {
+    TAIHANG_ASSERT(!a.empty() && a.size() == b.size(), "APGC inner-product dimensions mismatch");
+    ZnElement result = a.front().ring_ctx->get_zero();
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        result += a[i] * b[i];
+    }
+    return result;
+}
+
+std::vector<ECPoint> generators(const std::shared_ptr<ECGroup>& group,
+                                std::size_t length,
+                                const std::string& label) {
+    std::vector<ECPoint> result(length, ECPoint(group));
+    for (std::size_t i = 0; i < length; ++i) {
+        const std::string name = label + std::to_string(i);
+        result[i] = group->curve_id == NID_X9_62_prime256v1 ?
+            hash_to_curve_standard(name, "TAIHANG-PROTOCOLS-V01-P256_XMD:SHA-256_SSWU_RO_",
+                *group) :
+            hash_to_curve_fast(name, *group);
+    }
+    return result;
+}
+
+range_proofs::inner_product::PublicParameters inner_parameters(
+    const pke::twisted_elgamal::PublicParameters& encryption,
+    const std::vector<ECPoint>& g,
+    const std::vector<ECPoint>& h,
+    const ECPoint& u) {
+    return {encryption.curve_id, g.size(), folding_rounds(g.size()), encryption.group_ctx,
+             encryption.ring_ctx, g, h, u};
+}
+
+range_proofs::inner_product::Proof initialize_inner(
+    const pke::twisted_elgamal::PublicParameters& encryption,
+    std::size_t length) {
+    const std::size_t rounds = folding_rounds(length);
+    return {std::vector<ECPoint>(rounds, ECPoint(encryption.group_ctx)),
+        std::vector<ECPoint>(rounds, ECPoint(encryption.group_ctx)),
+        ZnElement(encryption.ring_ctx), ZnElement(encryption.ring_ctx)};
+}
+
 namespace inner = taihang::zkp::range_proofs::inner_product;
 using ScalarVector = std::vector<ZnElement>;
 
 bool valid_dimensions(const PublicParameters& pp, const Statement& statement) {
     return taihang::arithmetic::is_pow2(pp.participant_count) &&
         pp.vector_g.size() == pp.participant_count && pp.vector_h.size() == pp.participant_count &&
-        statement.commitments.size() == pp.participant_count && statement.count <= pp.participant_count;
+        statement.commitments.size() == pp.participant_count &&
+            statement.count <= pp.participant_count;
 }
 
-inner::PublicParameters inner_parameters(const PublicParameters& pp,
-    const Statement& statement, const ScalarVector& inverse_y, const ZnElement& e) {
+inner::PublicParameters inner_parameters(
+    const PublicParameters& pp,
+    const Statement& statement,
+    const ScalarVector& inverse_y,
+    const ZnElement& e) {
     std::vector<ECPoint> g(pp.participant_count, ECPoint(pp.encryption.group_ctx));
     for (std::size_t i = 0; i < pp.participant_count; ++i) {
         g[i] = pp.vector_g[i] * inverse_y[i] + statement.commitments[i];
     }
-    return common::inner_parameters(pp.encryption, g, pp.vector_h, pp.u * e);
+    return inner_parameters(pp.encryption, g, pp.vector_h, pp.u * e);
 }
 
 } // namespace
 
 PublicParameters setup(const pke::twisted_elgamal::PublicParameters& encryption,
                        std::size_t participant_count) {
-    TAIHANG_ASSERT(taihang::arithmetic::is_pow2(participant_count), "inactive participant count must be a power of two");
+    TAIHANG_ASSERT(taihang::arithmetic::is_pow2(participant_count),
+        "inactive participant count must be a power of two");
     return {encryption, participant_count,
-        common::generators(encryption.group_ctx, 1, "taihang/apgc/inactive/u/")[0],
-        common::generators(encryption.group_ctx, participant_count, "taihang/apgc/inactive/g/"),
-        common::generators(encryption.group_ctx, participant_count, "taihang/apgc/inactive/h/")};
+        generators(encryption.group_ctx, 1, "taihang/apgc/inactive/u/")[0],
+        generators(encryption.group_ctx, participant_count, "taihang/apgc/inactive/g/"),
+        generators(encryption.group_ctx, participant_count, "taihang/apgc/inactive/h/")};
 }
 
 bool Proof::operator==(const Proof& other) const {
@@ -70,7 +133,7 @@ Proof initialize_proof(const PublicParameters& pp) {
     const std::shared_ptr<Zn> ring = pp.encryption.ring_ctx;
     return {ECPoint(group), ECPoint(group), ECPoint(group), ECPoint(group), ECPoint(group),
         ZnElement(ring), ZnElement(ring), ZnElement(ring), ZnElement(ring),
-        common::initialize_inner(pp.encryption, pp.participant_count)};
+        initialize_inner(pp.encryption, pp.participant_count)};
 }
 
 Proof prove(const PublicParameters& pp,
@@ -91,23 +154,26 @@ Proof prove(const PublicParameters& pp,
         a_right[i] = witness.bits[i] - one;
     }
     Proof proof = initialize_proof(pp);
-    proof.a = ec_point_msm(pp.vector_g, witness.bits) + ec_point_msm(pp.vector_h, a_right) + pp.u * alpha;
+    proof.a = ec_point_msm(pp.vector_g, witness.bits) + ec_point_msm(pp.vector_h,
+        a_right) + pp.u * alpha;
     proof.s = ec_point_msm(pp.vector_g, s_left) + ec_point_msm(pp.vector_h, s_right) + pp.u * beta;
     std::ostringstream transcript;
     transcript << context << proof.a;
     const ZnElement y = hash_to_zn(transcript.str(), *ring);
     transcript << proof.s;
     const ZnElement z = hash_to_zn(transcript.str(), *ring);
-    const ScalarVector y_power = common::powers(n, y);
-    const ScalarVector inverse_y = common::powers(n, y.inv());
-    ScalarVector l0(n, ring->get_zero()), l1(n, ring->get_zero()), r0(n, ring->get_zero());
+    const ScalarVector y_power = powers(n, y);
+    const ScalarVector inverse_y = powers(n, y.inv());
+    ScalarVector l0(n, ring->get_zero());
+    ScalarVector l1(n, ring->get_zero());
+    ScalarVector r0(n, ring->get_zero());
     for (std::size_t i = 0; i < n; ++i) {
         l0[i] = y_power[i] * (witness.bits[i] - z);
         l1[i] = y_power[i] * s_left[i];
         r0[i] = a_right[i] + z + z * z * inverse_y[i];
     }
-    const ZnElement t1 = common::dot(l1, r0) + common::dot(l0, s_right);
-    const ZnElement t2 = common::dot(l1, s_right);
+    const ZnElement t1 = dot(l1, r0) + dot(l0, s_right);
+    const ZnElement t2 = dot(l1, s_right);
     const ZnElement tau1 = ring->gen_random();
     const ZnElement tau2 = ring->gen_random();
     proof.t1 = ec_point_msm(pp.encryption.g, t1, pp.encryption.h, tau1);
@@ -116,23 +182,26 @@ Proof prove(const PublicParameters& pp,
     proof.e = ec_point_msm(statement.commitments, l1) - pp.encryption.g * r_s;
     transcript << proof.t1 << proof.t2 << proof.e;
     const ZnElement x = hash_to_zn(transcript.str(), *ring);
-    ScalarVector l(n, ring->get_zero()), r(n, ring->get_zero());
+    ScalarVector l(n, ring->get_zero());
+    ScalarVector r(n, ring->get_zero());
     for (std::size_t i = 0; i < n; ++i) {
         l[i] = l0[i] + l1[i] * x;
         r[i] = r0[i] + s_right[i] * x;
     }
-    proof.t = common::dot(l, r);
+    proof.t = dot(l, r);
     proof.taux = tau1 * x + tau2 * x * x;
     proof.mu = alpha + beta * x;
     proof.f_s = r_s * x;
     std::size_t selected = 0;
     for (std::size_t i = 0; i < n; ++i) {
         if (witness.bits[i] == one) {
-            TAIHANG_ASSERT(selected < witness.randomness.size(), "inactive participant randomness length mismatch");
+            TAIHANG_ASSERT(selected < witness.randomness.size(),
+                "inactive participant randomness length mismatch");
             proof.f_s += witness.randomness[selected++] * y_power[i];
         }
     }
-    TAIHANG_ASSERT(selected == witness.randomness.size(), "inactive participant randomness length mismatch");
+    TAIHANG_ASSERT(selected == witness.randomness.size(),
+        "inactive participant randomness length mismatch");
     transcript << x;
     const ZnElement e = hash_to_zn(transcript.str(), *ring);
     const inner::PublicParameters ip = inner_parameters(pp, statement, inverse_y, e);
@@ -146,8 +215,8 @@ bool verify(const PublicParameters& pp,
             const Proof& proof,
             std::string_view context) {
     if (!valid_dimensions(pp, statement) ||
-        proof.inner_product.left.size() != common::folding_rounds(pp.participant_count) ||
-        proof.inner_product.right.size() != common::folding_rounds(pp.participant_count)) {
+        proof.inner_product.left.size() != folding_rounds(pp.participant_count) ||
+        proof.inner_product.right.size() != folding_rounds(pp.participant_count)) {
         return false;
     }
     const std::shared_ptr<Zn> ring = pp.encryption.ring_ctx;
@@ -163,8 +232,8 @@ bool verify(const PublicParameters& pp,
     const ZnElement x = hash_to_zn(transcript.str(), *ring);
     transcript << x;
     const ZnElement e = hash_to_zn(transcript.str(), *ring);
-    const ScalarVector y_power = common::powers(pp.participant_count, y);
-    const ScalarVector inverse_y = common::powers(pp.participant_count, y.inv());
+    const ScalarVector y_power = powers(pp.participant_count, y);
+    const ScalarVector inverse_y = powers(pp.participant_count, y.inv());
     ZnElement sum_y = ring->get_zero();
     for (const ZnElement& power : y_power) {
         sum_y += power;

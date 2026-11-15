@@ -59,28 +59,6 @@ amortized::PublicParameters amortized_parameters(const PublicParameters& pp) {
                             pp.threshold, pp.g, pp.h, generators);
 }
 
-/** Bind the ACF domain, application data, bases, and entire public statement. */
-std::string parent_context(const PublicParameters& pp,
-                           const Statement& statement,
-                           const ECPoint& p,
-                           std::string_view context) {
-    std::ostringstream transcript;
-    transcript << "taihang/k-out-of-n/attema-cramer-fehr/v1"
-               << BigInt(uint64_t{context.size()});
-    transcript.write(context.data(), static_cast<std::streamsize>(context.size()));
-    transcript << BigInt(static_cast<uint64_t>(pp.curve_id))
-               << BigInt(uint64_t{pp.statement_count})
-               << BigInt(uint64_t{pp.threshold}) << pp.g << pp.h;
-    for (const ECPoint& generator : pp.vector_g) {
-        transcript << generator;
-    }
-    for (const ECPoint& point : statement.points) {
-        transcript << point;
-    }
-    transcript << p;
-    return transcript.str();
-}
-
 /** q(X) = product_(j not in S) (1-X/(j+1)), so q(0)=1. */
 ScalarVector selection_polynomial(const PublicParameters& pp,
                                   const std::vector<bool>& selected) {
@@ -192,7 +170,7 @@ Proof prove(const PublicParameters& pp,
     // q(j+1)=0 off S; on S, g*(x_j*q(j+1))=c_j*q(j+1).
     // Commit to q's nonconstant coefficients and these weighted secrets.
     const ZnElement tau = pp.ring_ctx->gen_random();
-    const auto amortized_pp = amortized_parameters(pp);
+    const amortized::PublicParameters amortized_pp = amortized_parameters(pp);
     Proof proof{
         ec_point_msm(amortized_pp.vector_g, y) + pp.h * tau,
         {ECPoint(pp.group_ctx), ECPoint(pp.group_ctx), ZnElement(pp.ring_ctx),
@@ -201,7 +179,7 @@ Proof prove(const PublicParameters& pp,
     const amortized::Statement amortized_statement{proof.p, statement.points};
     proof.amortized_homomorphism = amortized::prove(
         amortized_pp, amortized_statement, {std::move(y), tau},
-        parent_context(pp, statement, proof.p, context));
+        context);
     return proof;
 }
 
@@ -216,11 +194,11 @@ bool verify(const PublicParameters& pp,
         proof.amortized_homomorphism.equality_proof.right_p.size() != pp.rounds) {
         return false;
     }
-    const auto amortized_pp = amortized_parameters(pp);
+    const amortized::PublicParameters amortized_pp = amortized_parameters(pp);
     const amortized::Statement amortized_statement{proof.p, statement.points};
     return amortized::verify(
         amortized_pp, amortized_statement, proof.amortized_homomorphism,
-        parent_context(pp, statement, proof.p, context));
+        context);
 }
 
 } // namespace taihang::zkp::k_out_of_n::attema_cramer_fehr

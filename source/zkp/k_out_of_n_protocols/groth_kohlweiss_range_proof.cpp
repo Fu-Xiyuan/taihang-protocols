@@ -26,34 +26,11 @@ bool compatible_parameters(const PublicParameters& pp) {
         pp.range.g == pp.subset.g && pp.range.h == pp.subset.h && pp.range.u == pp.subset.u;
 }
 
-std::string parent_context(const PublicParameters& pp, std::string_view context) {
-    std::ostringstream transcript;
-    transcript << "taihang/groth-kohlweiss-range/v1" << BigInt(uint64_t{context.size()});
-    transcript.write(context.data(), static_cast<std::streamsize>(context.size()));
-    transcript << BigInt(uint64_t{pp.range.range_bits}) << BigInt(uint64_t{pp.range.value_count});
-    for (std::size_t i = 0; i < pp.range.vector_g.size(); ++i) {
-        transcript << pp.range.vector_g[i] << pp.range.vector_h[i];
-    }
-    return transcript.str();
-}
-
-std::string range_context(const subset::Proof& proof, std::string_view parent) {
-    std::ostringstream transcript;
-    transcript.write(parent.data(), static_cast<std::streamsize>(parent.size()));
-    transcript << proof;
-    return transcript.str();
-}
-
-/** The bounded values must be committed before the subset weights e^i are chosen. */
-std::string subset_context(const PublicParameters& pp, const ECPoint& a,
-                           const ECPoint& s, std::string_view context) {
-    std::ostringstream transcript;
-    transcript << parent_context(pp, context) << a << s;
-    return transcript.str();
-}
 } // namespace
 
-PublicParameters setup(int curve_id, std::size_t statement_count, std::size_t threshold,
+PublicParameters setup(int curve_id,
+                       std::size_t statement_count,
+                       std::size_t threshold,
                        std::size_t range_bits) {
     PublicParameters pp;
     pp.subset = subset::setup(curve_id, statement_count, threshold);
@@ -65,9 +42,11 @@ PublicParameters setup(int curve_id, std::size_t statement_count, std::size_t th
 bool Proof::operator==(const Proof& other) const {
     return subset == other.subset && range == other.range;
 }
+
 std::ostream& operator<<(std::ostream& os, const Proof& proof) {
     return os << proof.subset << proof.range;
 }
+
 std::istream& operator>>(std::istream& is, Proof& proof) {
     is >> proof.subset;
     if (is) {
@@ -76,32 +55,36 @@ std::istream& operator>>(std::istream& is, Proof& proof) {
     return is;
 }
 
-Proof prove(const PublicParameters& pp, const Statement& statement,
-            const Witness& witness, std::string_view context) {
+Proof prove(const PublicParameters& pp,
+            const Statement& statement,
+            const Witness& witness,
+            std::string_view context) {
     TAIHANG_ASSERT(compatible_parameters(pp), "GK range incompatible parameters");
-    TAIHANG_ASSERT(witness.values.size() == pp.subset.threshold, "GK range witness length mismatch");
-    auto range_state = range::detail::prepare(pp.range, witness.values);
-    const auto parent = subset_context(pp, range_state.a, range_state.s, context);
+    TAIHANG_ASSERT(witness.values.size() == pp.subset.threshold,
+        "GK range witness length mismatch");
     Proof proof;
     proof.subset = subset::prove(pp.subset, {statement.commitments},
-                                 {witness.indices, witness.randomness}, parent);
-    const auto aggregate = subset::detail::aggregate(pp.subset, {statement.commitments}, proof.subset, parent);
-    proof.range = range::detail::prove_prepared(pp.range, {aggregate.commitment, aggregate.weights},
-        proof.subset.z_g * aggregate.normalization, std::move(range_state), range_context(proof.subset, parent));
+        {witness.indices, witness.randomness}, context);
+    const subset::detail::Aggregate aggregate = subset::detail::aggregate(
+        pp.subset, {statement.commitments}, proof.subset, context);
+    proof.range = range::prove(pp.range, {aggregate.commitment, aggregate.weights},
+        {witness.values, proof.subset.z_g * aggregate.normalization}, context);
     return proof;
 }
 
-bool verify(const PublicParameters& pp, const Statement& statement,
-            const Proof& proof, std::string_view context) {
+bool verify(const PublicParameters& pp,
+            const Statement& statement,
+            const Proof& proof,
+            std::string_view context) {
     if (!compatible_parameters(pp)) {
         return false;
     }
-    const auto parent = subset_context(pp, proof.range.a, proof.range.s, context);
-    if (!subset::verify(pp.subset, {statement.commitments}, proof.subset, parent)) {
+    if (!subset::verify(pp.subset, {statement.commitments}, proof.subset, context)) {
         return false;
     }
-    const auto aggregate = subset::detail::aggregate(pp.subset, {statement.commitments}, proof.subset, parent);
+    const subset::detail::Aggregate aggregate = subset::detail::aggregate(pp.subset,
+        {statement.commitments}, proof.subset, context);
     return range::verify(pp.range, {aggregate.commitment, aggregate.weights}, proof.range,
-                          range_context(proof.subset, parent));
+                          context);
 }
 } // namespace taihang::zkp::k_out_of_n::groth_kohlweiss_range

@@ -6,7 +6,8 @@
 #ifndef TAIHANG_PROTOCOLS_APGC_INACTIVE_PARTICIPANT_PROOF_HPP
 #define TAIHANG_PROTOCOLS_APGC_INACTIVE_PARTICIPANT_PROOF_HPP
 
-#include <taihang/zkp/apgc/ciphertext_homomorphism_proof.hpp>
+#include <taihang/pke/twisted_elgamal.hpp>
+#include <taihang/zkp/range_proofs/inner_product_proof.hpp>
 
 namespace taihang::zkp::apgc::inactive_participant {
 

@@ -32,7 +32,9 @@ bool compatible_parameters(const PublicParameters& pp) {
 }
 
 /** Add an identity column: bridge randomness does not change the public maps. */
-bool extend_statement(const PublicParameters& pp, const Statement& statement, Statement& result) {
+bool extend_statement(const PublicParameters& pp,
+                      const Statement& statement,
+                      Statement& result) {
     if (!compatible_parameters(pp) || statement.bases.size() != pp.core.statement_count ||
         statement.outputs.size() != pp.core.statement_count) {
         return false;
@@ -56,19 +58,41 @@ bool extend_statement(const PublicParameters& pp, const Statement& statement, St
     return heterogeneous::detail::valid_statement(pp.core, result);
 }
 
-std::string parent_context(const PublicParameters& pp, std::string_view context) {
+std::string evaluation_context(const PublicParameters& pp,
+                               const ECPoint& p,
+                               const range::DelayedProof& proof,
+                               std::string_view context) {
+    std::ostringstream challenges;
+    challenges << context << proof.a << proof.s;
+    ZnElement z = hash_to_zn(challenges.str(), *pp.range.ring_ctx);
+    if (z.value.is_zero()) {
+        z = pp.range.ring_ctx->get_one();
+    }
     std::ostringstream transcript;
-    transcript << "taihang/heterogeneous-range/v1" << BigInt(uint64_t{context.size()});
-    transcript.write(context.data(), static_cast<std::streamsize>(context.size()));
-    transcript << BigInt(uint64_t{pp.range.range_bits});
-    for (std::size_t i = 0; i < pp.range.vector_g.size(); ++i) {
-        transcript << pp.range.vector_g[i] << pp.range.vector_h[i];
+    transcript << context << p << proof.aggregate << z;
+    return transcript.str();
+}
+
+std::string aggregation_context(const PublicParameters& pp,
+                                const Statement& statement,
+                                std::string_view prefix) {
+    std::ostringstream transcript;
+    transcript << prefix << BigInt(uint64_t{pp.core.threshold});
+    for (std::size_t j = 0; j < pp.core.statement_count; ++j) {
+        for (const ECPoint& base : statement.bases[j]) {
+            transcript << base;
+        }
+        for (const ECPoint& output : statement.outputs[j]) {
+            transcript << output;
+        }
     }
     return transcript.str();
 }
 
-std::vector<ECPoint> bridge_bases(const PublicParameters& pp, const std::vector<ZnElement>& weights) {
-    std::vector<ECPoint> bases(pp.core.commitment.vector_length, pp.range.group_ctx->get_infinity());
+std::vector<ECPoint> bridge_bases(const PublicParameters& pp,
+                                  const std::vector<ZnElement>& weights) {
+    std::vector<ECPoint> bases(pp.core.commitment.vector_length,
+        pp.range.group_ctx->get_infinity());
     for (std::size_t j = 0; j < pp.core.statement_count; ++j) {
         const std::size_t index = pp.core.statement_count + j * pp.core.opening_length;
         bases[index] = pp.range.h * weights[j];
@@ -78,23 +102,31 @@ std::vector<ECPoint> bridge_bases(const PublicParameters& pp, const std::vector<
 }
 } // namespace
 
-PublicParameters setup(int curve_id, std::size_t statement_count, std::size_t threshold,
-                       std::size_t opening_length, std::size_t output_length, std::size_t range_bits) {
+PublicParameters setup(int curve_id,
+                       std::size_t statement_count,
+                       std::size_t threshold,
+                       std::size_t opening_length,
+                       std::size_t output_length,
+                       std::size_t range_bits) {
     TAIHANG_ASSERT(opening_length > 0 && opening_length + 1 > opening_length,
                    "heterogeneous range invalid opening length");
     PublicParameters pp;
-    pp.core = heterogeneous::setup(curve_id, statement_count, threshold, opening_length + 1, output_length);
-    const auto& bp = pp.core.selection;
-    pp.range = range::setup(bp.group_ctx, bp.ring_ctx, range_bits, statement_count, bp.g, bp.h, bp.u);
+    pp.core = heterogeneous::setup(curve_id, statement_count, threshold, opening_length + 1,
+        output_length);
+    const nizk::fixed_weight_binary_vector::PublicParameters& bp = pp.core.selection;
+    pp.range = range::setup(bp.group_ctx, bp.ring_ctx, range_bits, statement_count, bp.g, bp.h,
+        bp.u);
     return pp;
 }
 
 bool Proof::operator==(const Proof& other) const {
     return core == other.core && range == other.range;
 }
+
 std::ostream& operator<<(std::ostream& os, const Proof& proof) {
     return os << proof.core << proof.range;
 }
+
 std::istream& operator>>(std::istream& is, Proof& proof) {
     is >> proof.core;
     if (is) {
@@ -103,52 +135,60 @@ std::istream& operator>>(std::istream& is, Proof& proof) {
     return is;
 }
 
-Proof prove(const PublicParameters& pp, const Statement& statement,
-            const Witness& witness, std::string_view context) {
+Proof prove(const PublicParameters& pp,
+            const Statement& statement,
+            const Witness& witness,
+            std::string_view context) {
     Statement extended;
-    TAIHANG_ASSERT(extend_statement(pp, statement, extended), "heterogeneous range statement dimensions mismatch");
-    Witness augmented = witness;
-    for (auto& opening : augmented.openings) {
-        TAIHANG_ASSERT(opening.size() + 1 == pp.core.opening_length, "heterogeneous range opening length mismatch");
-        opening.push_back(pp.range.ring_ctx->gen_random());
+    TAIHANG_ASSERT(extend_statement(pp, statement, extended),
+        "heterogeneous range statement dimensions mismatch");
+    TAIHANG_ASSERT(witness.indices.size() == pp.core.threshold &&
+                       witness.openings.size() == pp.core.threshold,
+                   "heterogeneous range witness length mismatch");
+    TAIHANG_ASSERT(witness.randomness.size() == pp.core.threshold,
+                   "heterogeneous range randomness length mismatch");
+    heterogeneous::Witness augmented{witness.indices, witness.openings};
+    for (std::size_t i = 0; i < augmented.openings.size(); ++i) {
+        TAIHANG_ASSERT(augmented.openings[i].size() + 1 == pp.core.opening_length,
+                       "heterogeneous range opening length mismatch");
+        augmented.openings[i].push_back(witness.randomness[i]);
     }
-    const auto state = heterogeneous::detail::prepare(pp.core, augmented);
-    const std::string parent = parent_context(pp, context);
-    const auto range_parent = heterogeneous::detail::binding_context(pp.core, extended, state.p, state.s, parent);
+    const heterogeneous::detail::ProverState state = heterogeneous::detail::prepare(pp.core,
+        augmented);
     std::vector<ZnElement> values(pp.core.statement_count, pp.range.ring_ctx->get_zero());
     std::vector<ZnElement> randomness(pp.core.statement_count, pp.range.ring_ctx->get_zero());
     for (std::size_t j = 0; j < pp.core.statement_count; ++j) {
-        const auto offset = pp.core.statement_count + j * pp.core.opening_length;
+        const std::size_t offset = pp.core.statement_count + j * pp.core.opening_length;
         values[j] = state.y[offset];
         randomness[j] = state.y[offset + pp.core.opening_length - 1];
     }
     Proof proof;
-    proof.range = range::prove_delayed(pp.range, values, randomness, range_parent);
-    const auto weights = range::delayed_weights(pp.range, proof.range, range_parent);
-    const auto bases = bridge_bases(pp, weights);
-    std::ostringstream full_context;
-    full_context << parent << proof.range;
-    proof.core = heterogeneous::detail::prove_prepared(pp.core, extended, state, full_context.str(),
-                                                       &bases, &proof.range.aggregate);
+    proof.range = range::prove_delayed(pp.range, values, randomness, context);
+    const std::vector<ZnElement> weights = range::delayed_weights(pp.range, proof.range, context);
+    const std::vector<ECPoint> bases = bridge_bases(pp, weights);
+    const std::string prefix = evaluation_context(pp, state.p, proof.range, context);
+    const std::string parent = aggregation_context(pp, statement, prefix);
+    proof.core = heterogeneous::detail::prove_prepared(pp.core, extended, state, parent,
+        &bases, &proof.range.aggregate, prefix);
     return proof;
 }
 
-bool verify(const PublicParameters& pp, const Statement& statement,
-            const Proof& proof, std::string_view context) {
+bool verify(const PublicParameters& pp,
+            const Statement& statement,
+            const Proof& proof,
+            std::string_view context) {
     Statement extended;
     if (!extend_statement(pp, statement, extended)) {
         return false;
     }
-    const std::string parent = parent_context(pp, context);
-    const auto range_parent = heterogeneous::detail::binding_context(pp.core, extended, proof.core.p, proof.core.s, parent);
-    if (!range::verify_delayed(pp.range, proof.range, range_parent)) {
+    if (!range::verify_delayed(pp.range, proof.range, context)) {
         return false;
     }
-    const auto weights = range::delayed_weights(pp.range, proof.range, range_parent);
-    const auto bases = bridge_bases(pp, weights);
-    std::ostringstream full_context;
-    full_context << parent << proof.range;
-    return heterogeneous::detail::verify_extended(pp.core, extended, proof.core, full_context.str(),
-                                                   &bases, &proof.range.aggregate);
+    const std::vector<ZnElement> weights = range::delayed_weights(pp.range, proof.range, context);
+    const std::vector<ECPoint> bases = bridge_bases(pp, weights);
+    const std::string prefix = evaluation_context(pp, proof.core.p, proof.range, context);
+    const std::string parent = aggregation_context(pp, statement, prefix);
+    return heterogeneous::detail::verify_extended(pp.core, extended, proof.core, parent,
+        &bases, &proof.range.aggregate, prefix);
 }
 } // namespace taihang::zkp::k_out_of_n::heterogeneous_range

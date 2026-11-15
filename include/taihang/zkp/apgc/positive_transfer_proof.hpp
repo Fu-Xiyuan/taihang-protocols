@@ -6,7 +6,8 @@
 #ifndef TAIHANG_PROTOCOLS_APGC_POSITIVE_TRANSFER_PROOF_HPP
 #define TAIHANG_PROTOCOLS_APGC_POSITIVE_TRANSFER_PROOF_HPP
 
-#include <taihang/zkp/apgc/ciphertext_homomorphism_proof.hpp>
+#include <taihang/pke/twisted_elgamal.hpp>
+#include <taihang/zkp/range_proofs/bullet_proof.hpp>
 #include <taihang/zkp/sigma_protocols/logarithmic_binary_vector_proof.hpp>
 
 namespace taihang::zkp::apgc::positive_transfer {
@@ -68,7 +69,8 @@ struct Proof {
 };
 
 PublicParameters setup(const pke::twisted_elgamal::PublicParameters& encryption,
-                       std::size_t participant_count, std::size_t receiver_count);
+                       std::size_t participant_count,
+                       std::size_t receiver_count);
 Proof prove(const PublicParameters& pp,
             const Statement& statement,
             const Witness& witness,

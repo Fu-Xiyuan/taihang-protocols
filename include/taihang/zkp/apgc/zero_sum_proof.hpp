@@ -32,7 +32,8 @@ struct Proof {
     friend std::istream& operator>>(std::istream& is, Proof& proof);
 };
 
-PublicParameters setup(const pke::twisted_elgamal::PublicParameters& encryption, std::size_t count);
+PublicParameters setup(const pke::twisted_elgamal::PublicParameters& encryption,
+                       std::size_t count);
 Proof prove(const PublicParameters& pp,
             const Statement& statement,
             const Witness& witness,

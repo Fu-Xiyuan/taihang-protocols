@@ -22,7 +22,8 @@ namespace {
 namespace encryption = taihang::pke::twisted_elgamal;
 using Clock = std::chrono::steady_clock;
 
-solvency::Statement sender_statement(const Transaction& tx, const std::vector<Participant>& participants) {
+solvency::Statement sender_statement(const Transaction& tx,
+                                     const std::vector<Participant>& participants) {
     solvency::Statement statement{tx.public_keys, tx.transfers, {}};
     for (const Participant& participant : participants) {
         statement.balances.push_back(participant.balance);
@@ -60,11 +61,14 @@ double milliseconds(Clock::time_point from, Clock::time_point to) {
 
 } // namespace
 
-PublicParameters setup(int curve_id, std::size_t participant_count,
-                       std::size_t receiver_count, std::size_t message_bits,
+PublicParameters setup(int curve_id,
+                       std::size_t participant_count,
+                       std::size_t receiver_count,
+                       std::size_t message_bits,
                        std::size_t serial_bits) {
     TAIHANG_ASSERT(taihang::arithmetic::is_pow2(participant_count) && participant_count >= 2 &&
-        receiver_count > 0 && receiver_count < participant_count, "APGC invalid participant or receiver count");
+        receiver_count > 0 && receiver_count < participant_count,
+            "APGC invalid participant or receiver count");
     TAIHANG_ASSERT(message_bits > 0 && message_bits <= 32,
                    "APGC message bits must be in [1,32]");
     PublicParameters pp;
@@ -77,21 +81,25 @@ PublicParameters setup(int curve_id, std::size_t participant_count,
     pp.well_formedness = ciphertext_well_formedness::setup(pp.encryption, participant_count);
     pp.zero_sum = zero_sum::setup(pp.encryption, participant_count);
     pp.inactive_participant = inactive_participant::setup(pp.encryption, participant_count);
-    pp.positive_transfer = positive_transfer::setup(pp.encryption, participant_count, receiver_count);
+    pp.positive_transfer = positive_transfer::setup(pp.encryption, participant_count,
+        receiver_count);
     pp.solvency = solvency::setup(pp.encryption, participant_count);
     return pp;
 }
 
 Account initialize_account(const PublicParameters& pp) {
     const std::shared_ptr<ECGroup> group = pp.encryption.group_ctx;
-    return {{}, {ECPoint(group)}, {ZnElement(pp.encryption.ring_ctx)}, {ECPoint(group), ECPoint(group)}, kBigIntZero};
+    return {{}, {ECPoint(group)}, {ZnElement(pp.encryption.ring_ctx)}, {ECPoint(group),
+        ECPoint(group)}, kBigIntZero};
 }
 
-Account create_account(const PublicParameters& pp, const std::string& identity,
-                        const BigInt& initial_balance) {
+Account create_account(const PublicParameters& pp,
+                       const std::string& identity,
+                       const BigInt& initial_balance) {
     Account account = initialize_account(pp);
     account.identity = identity;
-    const std::pair<encryption::PublicKey, encryption::SecretKey> key = encryption::keygen(pp.encryption);
+    const std::pair<encryption::PublicKey, encryption::SecretKey> key =
+        encryption::keygen(pp.encryption);
     account.public_key = key.first;
     account.secret_key = key.second;
     account.amount = initial_balance;
@@ -101,9 +109,11 @@ Account create_account(const PublicParameters& pp, const std::string& identity,
     return account;
 }
 
-BigInt reveal_balance(const PublicParameters& pp, const Account& account,
-                       const dlog::BSGSSolver& solver) {
-    return encryption::decrypt_exp(pp.encryption, account.secret_key, account.balance, solver).value;
+BigInt reveal_balance(const PublicParameters& pp,
+                      const Account& account,
+                      const dlog::BSGSSolver& solver) {
+    return encryption::decrypt_exp(pp.encryption, account.secret_key, account.balance,
+        solver).value;
 }
 
 Transaction initialize_transaction(const PublicParameters& pp) {
@@ -111,14 +121,21 @@ Transaction initialize_transaction(const PublicParameters& pp) {
     return {ZnElement(pp.encryption.ring_ctx), pp.receiver_count,
         std::vector<ECPoint>(pp.participant_count, ECPoint(group)),
         std::vector<encryption::Ciphertext>(pp.participant_count, {ECPoint(group), ECPoint(group)}),
-        ciphertext_well_formedness::initialize_proof(pp.well_formedness), zero_sum::initialize_proof(pp.zero_sum),
-        inactive_participant::initialize_proof(pp.inactive_participant), solvency::initialize_proof(pp.solvency),
+        ciphertext_well_formedness::initialize_proof(pp.well_formedness),
+            zero_sum::initialize_proof(pp.zero_sum),
+        inactive_participant::initialize_proof(pp.inactive_participant),
+            solvency::initialize_proof(pp.solvency),
         positive_transfer::initialize_proof(pp.positive_transfer)};
 }
 
-Transaction create_transaction(const PublicParameters& pp, const Account& sender,
-    const std::vector<BigInt>& amounts, const std::vector<Participant>& participants,
-    std::size_t sender_index, const std::vector<std::size_t>& receiver_indices, GenerationMetrics* metrics) {
+Transaction create_transaction(const PublicParameters& pp,
+                               const Account& sender,
+                               const std::vector<BigInt>& amounts,
+                               const std::vector<Participant>& participants,
+                               std::size_t sender_index,
+                               const std::vector<std::size_t>& receiver_indices,
+                               const dlog::BSGSSolver& solver,
+                               GenerationMetrics* metrics) {
     const Clock::time_point start = Clock::now();
     if (participants.size() != pp.participant_count || sender_index >= pp.participant_count ||
         amounts.size() != pp.receiver_count || receiver_indices.size() != pp.receiver_count) {
@@ -126,14 +143,12 @@ Transaction create_transaction(const PublicParameters& pp, const Account& sender
     }
     const std::shared_ptr<Zn> ring = pp.encryption.ring_ctx;
     if (participants[sender_index].public_key != sender.public_key.y ||
-        participants[sender_index].balance != sender.balance || sender.secret_key.x.value.is_zero() ||
+        participants[sender_index].balance != sender.balance ||
+            sender.secret_key.x.value.is_zero() ||
         pp.encryption.g * sender.secret_key.x != sender.public_key.y) {
         throw std::invalid_argument("APGC sender account does not match the anonymous set");
     }
-    if (encryption::decrypt_raw(pp.encryption, sender.secret_key, sender.balance) !=
-        pp.encryption.h * ZnElement(ring, sender.amount)) {
-        throw std::invalid_argument("APGC cached balance does not match the encrypted balance");
-    }
+    const BigInt balance = reveal_balance(pp, sender, solver);
     const BigInt transfer_limit = kBigIntOne.lshift(32);
     BigInt debit = kBigIntZero;
     std::vector<bool> selected(pp.participant_count, false);
@@ -148,8 +163,9 @@ Transaction create_transaction(const PublicParameters& pp, const Account& sender
         selected[receiver_indices[i]] = true;
         debit += amounts[i];
     }
-    const BigInt post_balance = sender.amount - debit;
-    if (debit <= kBigIntZero || debit > transfer_limit || post_balance <= kBigIntZero || post_balance > transfer_limit) {
+    const BigInt post_balance = balance - debit;
+    if (debit <= kBigIntZero || debit > transfer_limit || post_balance <= kBigIntZero ||
+        post_balance > transfer_limit) {
         throw std::invalid_argument("APGC invalid transfer amount or remaining balance");
     }
     Transaction tx = initialize_transaction(pp);
@@ -159,10 +175,12 @@ Transaction create_transaction(const PublicParameters& pp, const Account& sender
     for (std::size_t i = 0; i < amounts.size(); ++i) {
         values[receiver_indices[i]] = ZnElement(ring, amounts[i]);
     }
-    const std::vector<ZnElement> randomness = gen_random_znelement_vector(ring, pp.participant_count);
+    const std::vector<ZnElement> randomness = gen_random_znelement_vector(ring,
+        pp.participant_count);
     for (std::size_t j = 0; j < pp.participant_count; ++j) {
         tx.public_keys[j] = participants[j].public_key;
-        tx.transfers[j] = encryption::encrypt(pp.encryption, {tx.public_keys[j]}, values[j], randomness[j]);
+        tx.transfers[j] = encryption::encrypt(pp.encryption, {tx.public_keys[j]}, values[j],
+            randomness[j]);
     }
     const Clock::time_point proof_start = Clock::now();
     tx.well_formedness = ciphertext_well_formedness::prove(pp.well_formedness,
@@ -180,7 +198,8 @@ Transaction create_transaction(const PublicParameters& pp, const Account& sender
     tx.inactive_participant = inactive_participant::prove(pp.inactive_participant,
         {public_commitments, pp.participant_count - pp.receiver_count - 1}, inactive);
     tx.solvency = solvency::prove(pp.solvency, sender_statement(tx, participants),
-        {sender.secret_key.x, sender_index, ZnElement(ring, post_balance), values[sender_index], randomness[sender_index]});
+        {sender.secret_key.x, sender_index, ZnElement(ring, post_balance), values[sender_index],
+            randomness[sender_index]});
     if (pp.receiver_count > 1) {
         positive_transfer::Witness positive;
         for (const std::size_t index : receiver_indices) {
@@ -188,7 +207,8 @@ Transaction create_transaction(const PublicParameters& pp, const Account& sender
             positive.values.push_back(values[index]);
             positive.randomness.push_back(randomness[index]);
         }
-        tx.positive_transfer = positive_transfer::prove(pp.positive_transfer, {public_commitments}, positive);
+        tx.positive_transfer = positive_transfer::prove(pp.positive_transfer,
+            {public_commitments}, positive);
     }
     const Clock::time_point finish = Clock::now();
     if (metrics) {
@@ -206,9 +226,11 @@ Transaction create_transaction(const PublicParameters& pp, const Account& sender
     return tx;
 }
 
-bool verify_transaction(const PublicParameters& pp, const Transaction& tx,
-                         const std::vector<Participant>& participants) {
-    if (participants.size() != pp.participant_count || tx.public_keys.size() != pp.participant_count ||
+bool verify_transaction(const PublicParameters& pp,
+                        const Transaction& tx,
+                        const std::vector<Participant>& participants) {
+    if (participants.size() != pp.participant_count ||
+        tx.public_keys.size() != pp.participant_count ||
         tx.transfers.size() != pp.participant_count || tx.receiver_count != pp.receiver_count) {
         return false;
     }
@@ -218,16 +240,21 @@ bool verify_transaction(const PublicParameters& pp, const Transaction& tx,
         }
     }
     const std::vector<ECPoint> public_commitments = commitments(tx);
-    return ciphertext_well_formedness::verify(pp.well_formedness, {tx.public_keys, tx.transfers}, tx.well_formedness) &&
+    return ciphertext_well_formedness::verify(pp.well_formedness, {tx.public_keys,
+        tx.transfers}, tx.well_formedness) &&
         zero_sum::verify(pp.zero_sum, {sum_commitments(pp, tx)}, tx.zero_sum) &&
         inactive_participant::verify(pp.inactive_participant,
-            {public_commitments, pp.participant_count - pp.receiver_count - 1}, tx.inactive_participant) &&
+            {public_commitments, pp.participant_count - pp.receiver_count - 1},
+                tx.inactive_participant) &&
         solvency::verify(pp.solvency, sender_statement(tx, participants), tx.solvency) &&
-        (tx.receiver_count == 1 || positive_transfer::verify(pp.positive_transfer, {public_commitments}, tx.positive_transfer));
+        (tx.receiver_count == 1 || positive_transfer::verify(pp.positive_transfer,
+            {public_commitments}, tx.positive_transfer));
 }
 
-bool update_accounts(const PublicParameters& pp, const Transaction& tx,
-                       std::vector<Account>& accounts, const dlog::BSGSSolver& solver) {
+bool update_accounts(const PublicParameters& pp,
+                     const Transaction& tx,
+                     std::vector<Account>& accounts,
+                     const dlog::BSGSSolver& solver) {
     std::vector<Participant> participants;
     for (const Account& account : accounts) {
         participants.push_back({account.identity, account.public_key.y, account.balance});
@@ -306,14 +333,16 @@ std::ostream& operator<<(std::ostream& os, const Account& account) {
 
 std::istream& operator>>(std::istream& is, Account& account) {
     std::uint64_t length = 0;
-    if (!is.read(reinterpret_cast<char*>(&length), sizeof(length)) || length > account.identity.max_size()) {
+    if (!is.read(reinterpret_cast<char*>(&length),
+        sizeof(length)) || length > account.identity.max_size()) {
         is.setstate(std::ios::failbit);
         return is;
     }
     account.identity.clear();
     char buffer[4096];
     while (length > 0) {
-        const std::size_t count = static_cast<std::size_t>(std::min<std::uint64_t>(length, sizeof(buffer)));
+        const std::size_t count = static_cast<std::size_t>(std::min<std::uint64_t>(length,
+            sizeof(buffer)));
         if (!is.read(buffer, static_cast<std::streamsize>(count))) {
             return is;
         }

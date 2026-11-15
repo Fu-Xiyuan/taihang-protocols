@@ -37,12 +37,18 @@ struct Proof {
 };
 
 /** @brief Supports power-of-two n>=2, arbitrary 1<=k<=n, and power-of-two range_bits. */
-PublicParameters setup(int curve_id, std::size_t statement_count, std::size_t threshold,
+PublicParameters setup(int curve_id,
+                       std::size_t statement_count,
+                       std::size_t threshold,
                        std::size_t range_bits);
-Proof prove(const PublicParameters& pp, const Statement& statement,
-            const Witness& witness, std::string_view context = {});
-bool verify(const PublicParameters& pp, const Statement& statement,
-            const Proof& proof, std::string_view context = {});
+Proof prove(const PublicParameters& pp,
+            const Statement& statement,
+            const Witness& witness,
+            std::string_view context = {});
+bool verify(const PublicParameters& pp,
+            const Statement& statement,
+            const Proof& proof,
+            std::string_view context = {});
 
 } // namespace taihang::zkp::k_out_of_n::groth_kohlweiss_range
 #endif // TAIHANG_PROTOCOLS_ZKP_GROTH_KOHLWEISS_RANGE_PROOF_HPP

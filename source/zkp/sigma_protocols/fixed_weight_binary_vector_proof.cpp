@@ -70,24 +70,12 @@ ZnElement inner_product_value(const ScalarVector& a, const ScalarVector& b) {
     return result;
 }
 
-/** Bind the public relation and every generator before the first message. */
-std::string initial_transcript(const PublicParameters& pp,
-                               const Statement& statement,
+/** Start the transcript with the caller-supplied context. */
+std::string initial_transcript(const Statement& statement,
                                std::string_view context) {
     std::ostringstream transcript;
-    transcript << "taihang/fixed-weight-binary-vector/v1"
-               << BigInt(uint64_t{context.size()});
     transcript.write(context.data(),
                      static_cast<std::streamsize>(context.size()));
-    transcript << BigInt(static_cast<uint64_t>(pp.curve_id))
-               << BigInt(uint64_t{pp.vector_length})
-               << pp.g << pp.h << pp.u << pp.inner_product_u;
-    for (const ECPoint& generator : pp.vector_g) {
-        transcript << generator;
-    }
-    for (const ECPoint& generator : pp.vector_h) {
-        transcript << generator;
-    }
     transcript << statement.p << BigInt(uint64_t{statement.weight});
     return transcript.str();
 }
@@ -186,7 +174,7 @@ PublicParameters setup(const std::shared_ptr<ECGroup>& group_ctx,
         TAIHANG_ASSERT(!base->is_at_infinity(),
                        "binary-vector bases cannot be identities");
     }
-    for (const auto* generators : {&vector_g, &vector_h}) {
+    for (const std::vector<ECPoint>* generators : {&vector_g, &vector_h}) {
         for (const ECPoint& generator : *generators) {
             TAIHANG_ASSERT(generator.group_ctx == group_ctx.get(),
                            "binary-vector generator context mismatch");
@@ -253,12 +241,12 @@ Proof prove(const PublicParameters& pp,
     };
 
     std::ostringstream transcript;
-    transcript << initial_transcript(pp, statement, context) << proof.a;
+    transcript << initial_transcript(statement, context) << proof.a;
     ZnElement y = hash_to_zn(transcript.str(), *pp.ring_ctx);
     if (y.value.is_zero()) {
         y = one;
     }
-    transcript << y;
+    transcript << proof.a;
     ZnElement z = hash_to_zn(transcript.str(), *pp.ring_ctx);
     if (z.value.is_zero()) {
         z = one;
@@ -299,14 +287,15 @@ Proof prove(const PublicParameters& pp,
     proof.tau = tau1 * x + tau2 * x * x;
     proof.mu = witness.r + rho * x;
 
-    // Bind every response and the unblinded commitment before scaling u_ip.
+    // Hash the unblinded commitment and inner product before scaling u_ip.
     const ECPoint p = unblinded_commitment(pp, statement, proof, x, z, y_inverse_power);
-    transcript << p << proof.t << proof.tau << proof.mu;
+    transcript << p << proof.t;
     ZnElement e = hash_to_zn(transcript.str(), *pp.ring_ctx);
     if (e.value.is_zero()) {
         e = one;
     }
-    const auto ip_pp = make_inner_product_parameters(pp, y_inverse_power, e);
+    const inner_product::PublicParameters ip_pp = make_inner_product_parameters(pp,
+        y_inverse_power, e);
     const inner_product::Statement ip_statement{p + ip_pp.u * proof.t};
     proof.inner_product = inner_product::prove(
         ip_pp, ip_statement, {std::move(l_x), std::move(r_x)}, transcript.str());
@@ -324,12 +313,12 @@ bool verify(const PublicParameters& pp,
     }
     const ZnElement one = pp.ring_ctx->get_one();
     std::ostringstream transcript;
-    transcript << initial_transcript(pp, statement, context) << proof.a;
+    transcript << initial_transcript(statement, context) << proof.a;
     ZnElement y = hash_to_zn(transcript.str(), *pp.ring_ctx);
     if (y.value.is_zero()) {
         y = one;
     }
-    transcript << y;
+    transcript << proof.a;
     ZnElement z = hash_to_zn(transcript.str(), *pp.ring_ctx);
     if (z.value.is_zero()) {
         z = one;
@@ -359,12 +348,13 @@ bool verify(const PublicParameters& pp,
     }
 
     const ECPoint p = unblinded_commitment(pp, statement, proof, x, z, y_inverse_power);
-    transcript << p << proof.t << proof.tau << proof.mu;
+    transcript << p << proof.t;
     ZnElement e = hash_to_zn(transcript.str(), *pp.ring_ctx);
     if (e.value.is_zero()) {
         e = one;
     }
-    const auto ip_pp = make_inner_product_parameters(pp, y_inverse_power, e);
+    const inner_product::PublicParameters ip_pp = make_inner_product_parameters(pp,
+        y_inverse_power, e);
     const inner_product::Statement ip_statement{p + ip_pp.u * proof.t};
     return inner_product::verify(ip_pp, ip_statement, proof.inner_product, transcript.str());
 }

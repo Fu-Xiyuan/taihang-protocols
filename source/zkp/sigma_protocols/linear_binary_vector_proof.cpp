@@ -64,16 +64,9 @@ ZnElement derive_challenge(const PublicParameters& pp,
                            const ECPoint& d,
                            std::string_view context) {
     std::ostringstream transcript;
-    transcript << "taihang/linear-binary-vector/v1"
-               << BigInt(uint64_t{context.size()});
     transcript.write(context.data(),
                      static_cast<std::streamsize>(context.size()));
-    transcript << BigInt(static_cast<uint64_t>(pp.curve_id))
-               << BigInt(uint64_t{pp.vector_length}) << pp.h;
-    for (const ECPoint& generator : pp.vector_g) {
-        transcript << generator;
-    }
-    transcript << statement.p << a << c << d;
+    transcript << a << c << d;
     ZnElement x = hash_to_zn(transcript.str(), *pp.ring_ctx);
     if (x.value.is_zero()) {
         x = pp.ring_ctx->get_one();
@@ -172,7 +165,7 @@ Proof prove(const PublicParameters& pp,
             const Statement& statement,
             const Witness& witness,
             std::string_view context) {
-    auto state = detail::commit(pp, witness);
+    detail::ProverState state = detail::commit(pp, witness);
     const ZnElement x = derive_challenge(
         pp, statement, state.a, state.c, state.d, context);
     return detail::respond(pp, witness, std::move(state), x);

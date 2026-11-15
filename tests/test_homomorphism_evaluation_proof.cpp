@@ -32,26 +32,27 @@ protected:
 };
 
 TEST_F(HomomorphismEvaluationProofTest, AcceptsAndReusesParentContexts) {
-    auto composed = evaluation::setup(pp.group_ctx, pp.ring_ctx, pp.u, pp.vector_g);
+    evaluation::PublicParameters composed = evaluation::setup(pp.group_ctx, pp.ring_ctx, pp.u,
+        pp.vector_g);
     EXPECT_EQ(composed.group_ctx.get(), pp.group_ctx.get());
     EXPECT_EQ(composed.ring_ctx.get(), pp.ring_ctx.get());
     EXPECT_TRUE(evaluation::verify(pp, statement, evaluation::prove(composed, statement, witness)));
 }
 
 TEST_F(HomomorphismEvaluationProofTest, RejectsWrongOpeningOrImage) {
-    auto wrong = witness;
+    evaluation::Witness wrong = witness;
     wrong.r += pp.ring_ctx->get_one();
     EXPECT_FALSE(evaluation::verify(pp, statement, evaluation::prove(pp, statement, wrong)));
-    auto changed = statement;
+    evaluation::Statement changed = statement;
     changed.q = changed.q + pp.u;
     EXPECT_FALSE(evaluation::verify(pp, changed, evaluation::prove(pp, changed, witness)));
 }
 
 TEST_F(HomomorphismEvaluationProofTest, BindsContextImageBasesAndCommitment) {
-    const auto proof = evaluation::prove(pp, statement, witness, "a");
+    const evaluation::Proof proof = evaluation::prove(pp, statement, witness, "a");
     EXPECT_TRUE(evaluation::verify(pp, statement, proof, "a"));
     EXPECT_FALSE(evaluation::verify(pp, statement, proof, "b"));
-    auto changed = statement;
+    evaluation::Statement changed = statement;
     std::swap(changed.bases[0], changed.bases[1]);
     EXPECT_FALSE(evaluation::verify(pp, changed, proof, "a"));
     changed = statement;
@@ -60,47 +61,54 @@ TEST_F(HomomorphismEvaluationProofTest, BindsContextImageBasesAndCommitment) {
 }
 
 TEST_F(HomomorphismEvaluationProofTest, AcceptsIdentityImageAndPadding) {
-    auto bases = pp.vector_g;
+    std::vector<ECPoint> bases = pp.vector_g;
     bases.back() = pp.group_ctx->get_infinity();
-    const auto composed = evaluation::setup(pp.group_ctx, pp.ring_ctx, pp.u, bases);
+    const evaluation::PublicParameters composed = evaluation::setup(pp.group_ctx, pp.ring_ctx,
+        pp.u, bases);
     const evaluation::Statement relation{
         ec_point_msm(bases, witness.a) + pp.u * witness.r, pp.group_ctx->get_infinity(),
         std::vector<ECPoint>(8, pp.group_ctx->get_infinity())};
-    EXPECT_TRUE(evaluation::verify(composed, relation, evaluation::prove(composed, relation, witness)));
+    EXPECT_TRUE(evaluation::verify(composed, relation, evaluation::prove(composed, relation,
+        witness)));
 }
 
 TEST_F(HomomorphismEvaluationProofTest, RejectsTamperingAndMalformedDimensions) {
-    const auto valid = evaluation::prove(pp, statement, witness);
-    for (auto member : {&evaluation::Proof::a_p, &evaluation::Proof::a_q}) {
-        auto proof = valid;
+    const evaluation::Proof valid = evaluation::prove(pp, statement, witness);
+    for (ECPoint evaluation::Proof::* member :
+         {&evaluation::Proof::a_p,
+          &evaluation::Proof::a_q}) {
+        evaluation::Proof proof = valid;
         proof.*member = proof.*member + pp.u;
         EXPECT_FALSE(evaluation::verify(pp, statement, proof));
     }
-    auto proof = valid;
+    evaluation::Proof proof = valid;
     proof.f += pp.ring_ctx->get_one();
     EXPECT_FALSE(evaluation::verify(pp, statement, proof));
-    for (auto member : {&equality::Proof::left_g, &equality::Proof::right_g,
-                         &equality::Proof::left_p, &equality::Proof::right_p}) {
+    for (std::vector<ECPoint> equality::Proof::* member :
+         {&equality::Proof::left_g,
+          &equality::Proof::right_g,
+          &equality::Proof::left_p,
+          &equality::Proof::right_p}) {
         proof = valid;
         (proof.equality_proof.*member)[0] = (proof.equality_proof.*member)[0] + pp.u;
         EXPECT_FALSE(evaluation::verify(pp, statement, proof));
         (proof.equality_proof.*member).pop_back();
         EXPECT_FALSE(evaluation::verify(pp, statement, proof));
     }
-    auto changed = statement;
+    evaluation::Statement changed = statement;
     changed.bases.pop_back();
     EXPECT_FALSE(evaluation::verify(pp, changed, valid));
 }
 
 TEST_F(HomomorphismEvaluationProofTest, SerializationAndTruncation) {
-    const auto proof = evaluation::prove(pp, statement, witness);
+    const evaluation::Proof proof = evaluation::prove(pp, statement, witness);
     std::stringstream stream;
     stream << proof;
-    auto decoded = empty();
+    evaluation::Proof decoded = empty();
     stream >> decoded;
     ASSERT_TRUE(stream);
     EXPECT_EQ(proof, decoded);
-    const auto bytes = stream.str();
+    const std::string bytes = stream.str();
     for (std::size_t n = 0; n < bytes.size(); ++n) {
         std::istringstream input(bytes.substr(0, n));
         decoded = empty();
@@ -110,7 +118,7 @@ TEST_F(HomomorphismEvaluationProofTest, SerializationAndTruncation) {
 }
 
 TEST(HomomorphismEvaluationProofStandaloneTest, HandlesLengthOne) {
-    auto pp = evaluation::setup(NID_X9_62_prime256v1, 1);
+    evaluation::PublicParameters pp = evaluation::setup(NID_X9_62_prime256v1, 1);
     const evaluation::Witness witness{{pp.ring_ctx->get_one()}, pp.ring_ctx->get_zero()};
     const evaluation::Statement statement{pp.vector_g[0], pp.u, {pp.u}};
     EXPECT_TRUE(evaluation::verify(pp, statement, evaluation::prove(pp, statement, witness)));

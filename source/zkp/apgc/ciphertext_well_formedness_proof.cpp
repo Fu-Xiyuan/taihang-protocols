@@ -12,7 +12,8 @@
 
 namespace taihang::zkp::apgc::ciphertext_well_formedness {
 
-PublicParameters setup(const pke::twisted_elgamal::PublicParameters& encryption, std::size_t count) {
+PublicParameters setup(const pke::twisted_elgamal::PublicParameters& encryption,
+                       std::size_t count) {
     return ciphertext_homomorphism::setup(encryption, count);
 }
 
@@ -41,7 +42,8 @@ Proof prove(const PublicParameters& pp,
             const Witness& witness,
             std::string_view context) {
     TAIHANG_ASSERT(witness.values.size() == pp.participant_count &&
-        witness.randomness.size() == pp.participant_count, "well-formedness witness length mismatch");
+        witness.randomness.size() == pp.participant_count,
+            "well-formedness witness length mismatch");
     std::vector<ZnElement> a = witness.randomness;
     a.insert(a.end(), witness.values.begin(), witness.values.end());
     const ZnElement r = pp.encryption.ring_ctx->gen_random();

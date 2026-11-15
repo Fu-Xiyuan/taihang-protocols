@@ -59,11 +59,34 @@ PublicParameters setup(const std::shared_ptr<ECGroup>& group_ctx,
                        const std::shared_ptr<Zn>& ring_ctx,
                        const ECPoint& u,
                        const std::vector<ECPoint>& vector_g);
-Proof prove(const PublicParameters& pp, const Statement& statement,
-            const Witness& witness, std::string_view context = {});
+Proof prove(const PublicParameters& pp,
+            const Statement& statement,
+            const Witness& witness,
+            std::string_view context = {});
 /** @note Arithmetic contexts must be compatible. Invalid dimensions/equations return false. */
-bool verify(const PublicParameters& pp, const Statement& statement,
-            const Proof& proof, std::string_view context = {});
+bool verify(const PublicParameters& pp,
+            const Statement& statement,
+            const Proof& proof,
+            std::string_view context = {});
+
+namespace detail {
+
+Proof initialize_proof(const PublicParameters& pp);
+/** @brief Parent supplies the original mask-challenge transcript and suffix. */
+Proof prove_with_transcript(const PublicParameters& pp,
+                            const Statement& statement,
+                            const Witness& witness,
+                            std::string& transcript,
+                            bool reset_equality_context,
+                            std::string_view suffix = {});
+bool verify_with_transcript(const PublicParameters& pp,
+                            const Statement& statement,
+                            const Proof& proof,
+                            std::string& transcript,
+                            bool reset_equality_context,
+                            std::string_view suffix = {});
+
+} // namespace detail
 
 } // namespace taihang::zkp::nizk::homomorphism_evaluation
 #endif // TAIHANG_PROTOCOLS_ZKP_SIGMA_HOMOMORPHISM_EVALUATION_PROOF_HPP

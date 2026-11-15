@@ -13,7 +13,8 @@
 
 namespace taihang::zkp::apgc::zero_sum {
 
-PublicParameters setup(const pke::twisted_elgamal::PublicParameters& encryption, std::size_t count) {
+PublicParameters setup(const pke::twisted_elgamal::PublicParameters& encryption,
+                       std::size_t count) {
     TAIHANG_ASSERT(count > 0, "zero-sum participant count must be positive");
     return {encryption, count};
 }
@@ -38,7 +39,8 @@ Proof prove(const PublicParameters& pp,
             const Statement& statement,
             const Witness& witness,
             std::string_view context) {
-    TAIHANG_ASSERT(witness.randomness.size() == pp.participant_count, "zero-sum witness length mismatch");
+    TAIHANG_ASSERT(witness.randomness.size() == pp.participant_count,
+        "zero-sum witness length mismatch");
     const ZnElement alpha = pp.encryption.ring_ctx->gen_random();
     Proof proof{pp.encryption.g * alpha, ZnElement(pp.encryption.ring_ctx)};
     std::ostringstream transcript;
