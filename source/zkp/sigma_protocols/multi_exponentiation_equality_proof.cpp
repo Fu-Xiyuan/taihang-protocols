@@ -182,8 +182,8 @@ Proof prove(const PublicParameters& pp,
     std::vector<ECPoint> current_p = pp.p;
     ScalarVector current_a = witness.a;
 
-    // Bind the generator basis and public result before any folding messages.
-    // The context length separates associated data from parameter encodings.
+    // Start with the caller's context, then append each round's folding messages.
+    // Generator bases and public results are not appended to this transcript.
     std::ostringstream transcript;
     transcript.write(context.data(),
                      static_cast<std::streamsize>(context.size()));

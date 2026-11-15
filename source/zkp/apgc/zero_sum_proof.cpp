@@ -32,7 +32,9 @@ std::istream& operator>>(std::istream& is, Proof& proof) {
 }
 
 Proof initialize_proof(const PublicParameters& pp) {
-    return {ECPoint(pp.encryption.group_ctx), ZnElement(pp.encryption.ring_ctx)};
+    return {
+        ECPoint(pp.encryption.group_ctx), ZnElement(pp.encryption.ring_ctx)
+    };
 }
 
 Proof prove(const PublicParameters& pp,
@@ -40,7 +42,7 @@ Proof prove(const PublicParameters& pp,
             const Witness& witness,
             std::string_view context) {
     TAIHANG_ASSERT(witness.randomness.size() == pp.participant_count,
-        "zero-sum witness length mismatch");
+                   "zero-sum witness length mismatch");
     const ZnElement alpha = pp.encryption.ring_ctx->gen_random();
     Proof proof{pp.encryption.g * alpha, ZnElement(pp.encryption.ring_ctx)};
     std::ostringstream transcript;

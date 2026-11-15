@@ -40,10 +40,12 @@ std::vector<ECPoint> generators(const std::shared_ptr<ECGroup>& group,
     std::vector<ECPoint> result(length, ECPoint(group));
     for (std::size_t i = 0; i < length; ++i) {
         const std::string name = label + std::to_string(i);
-        result[i] = group->curve_id == NID_X9_62_prime256v1 ?
-            hash_to_curve_standard(name, "TAIHANG-PROTOCOLS-V01-P256_XMD:SHA-256_SSWU_RO_",
-                *group) :
-            hash_to_curve_fast(name, *group);
+        result[i] = group->curve_id == NID_X9_62_prime256v1
+                        ? hash_to_curve_standard(
+                              name,
+                              "TAIHANG-PROTOCOLS-V01-P256_XMD:SHA-256_SSWU_RO_",
+                              *group)
+                        : hash_to_curve_fast(name, *group);
     }
     return result;
 }
@@ -54,30 +56,47 @@ range_proofs::bulletproof::PublicParameters range_parameters(
     std::size_t count,
     const ECPoint& u,
     const std::string& label) {
-    TAIHANG_ASSERT(taihang::arithmetic::is_pow2(range_bits) && taihang::arithmetic::is_pow2(count),
+    TAIHANG_ASSERT(taihang::arithmetic::is_pow2(range_bits) &&
+                       taihang::arithmetic::is_pow2(count),
                    "original APGC range dimensions must be powers of two");
     const std::size_t length = range_bits * count;
-    return {encryption.curve_id, range_bits, count, length, encryption.group_ctx,
-        encryption.ring_ctx, encryption.g, encryption.h, u,
+    return {
+        encryption.curve_id,
+        range_bits,
+        count,
+        length,
+        encryption.group_ctx,
+        encryption.ring_ctx,
+        encryption.g,
+        encryption.h,
+        u,
         generators(encryption.group_ctx, length, label + "/g/"),
-        generators(encryption.group_ctx, length, label + "/h/")};
+        generators(encryption.group_ctx, length, label + "/h/")
+    };
 }
 
 range_proofs::bulletproof::Proof initialize_range(
     const range_proofs::bulletproof::PublicParameters& pp) {
     const std::size_t rounds = folding_rounds(pp.vector_length);
-    return {ECPoint(pp.group_ctx), ECPoint(pp.group_ctx), ECPoint(pp.group_ctx),
+    return {
         ECPoint(pp.group_ctx),
-        ZnElement(pp.ring_ctx), ZnElement(pp.ring_ctx), ZnElement(pp.ring_ctx),
+        ECPoint(pp.group_ctx),
+        ECPoint(pp.group_ctx),
+        ECPoint(pp.group_ctx),
+        ZnElement(pp.ring_ctx),
+        ZnElement(pp.ring_ctx),
+        ZnElement(pp.ring_ctx),
         {std::vector<ECPoint>(rounds, ECPoint(pp.group_ctx)),
-         std::vector<ECPoint>(rounds, ECPoint(pp.group_ctx)), ZnElement(pp.ring_ctx),
-             ZnElement(pp.ring_ctx)}};
+         std::vector<ECPoint>(rounds, ECPoint(pp.group_ctx)),
+         ZnElement(pp.ring_ctx),
+         ZnElement(pp.ring_ctx)}
+    };
 }
 
 namespace range = taihang::zkp::range_proofs::bulletproof;
 using ScalarVector = std::vector<ZnElement>;
 
-template<class T>
+template <class T>
 void write_vector(std::ostream& os, const std::vector<T>& values) {
     const std::uint64_t size = values.size();
     os.write(reinterpret_cast<const char*>(&size), sizeof(size));
@@ -86,10 +105,10 @@ void write_vector(std::ostream& os, const std::vector<T>& values) {
     }
 }
 
-template<class T>
-void read_vector(std::istream& is, std::vector<T>& values) {
+template <class T> void read_vector(std::istream& is, std::vector<T>& values) {
     std::uint64_t size = 0;
-    if (!is.read(reinterpret_cast<char*>(&size), sizeof(size)) || size != values.size()) {
+    if (!is.read(reinterpret_cast<char*>(&size), sizeof(size)) ||
+        size != values.size()) {
         is.setstate(std::ios::failbit);
         return;
     }
@@ -105,8 +124,8 @@ ZnElement challenge(const PublicParameters& pp,
                     const Proof& proof,
                     std::string_view context) {
     std::ostringstream transcript;
-    transcript << sender_balance::detail::homomorphism_transcript(pp.sender, statement,
-        proof.sender, context)
+    transcript << sender_balance::detail::homomorphism_transcript(
+                      pp.sender, statement, proof.sender, context)
                << proof.a << proof.c << proof.d;
     return hash_to_zn(transcript.str(), *pp.sender.encryption.ring_ctx);
 }
@@ -168,21 +187,22 @@ PublicParameters setup(const pke::twisted_elgamal::PublicParameters& encryption,
                        std::size_t participant_count) {
     PublicParameters pp;
     pp.sender = sender_balance::setup(encryption, participant_count);
-    pp.index_g = generators(encryption.group_ctx, folding_rounds(participant_count),
-                                    "taihang/apgc/solvency/index/");
-    pp.values_range = range_parameters(encryption, 32, 1, pp.sender.u,
-        "taihang/apgc/solvency/values");
-    pp.shifted_range = range_parameters(encryption, 32, 1, pp.sender.u,
-        "taihang/apgc/solvency/shifted");
+    pp.index_g = generators(encryption.group_ctx,
+                            folding_rounds(participant_count),
+                            "taihang/apgc/solvency/index/");
+    pp.values_range = range_parameters(
+        encryption, 32, 1, pp.sender.u, "taihang/apgc/solvency/values");
+    pp.shifted_range = range_parameters(
+        encryption, 32, 1, pp.sender.u, "taihang/apgc/solvency/shifted");
     return pp;
 }
 
 bool Proof::operator==(const Proof& other) const {
     return a == other.a && b == other.b && c == other.c && d == other.d &&
-        c_c == other.c_c && c_s == other.c_s && f == other.f && z_a == other.z_a &&
-            z_c == other.z_c &&
-        z_g == other.z_g && z_s == other.z_s && sender == other.sender &&
-            values == other.values && shifted == other.shifted;
+           c_c == other.c_c && c_s == other.c_s && f == other.f &&
+           z_a == other.z_a && z_c == other.z_c && z_g == other.z_g &&
+           z_s == other.z_s && sender == other.sender &&
+           values == other.values && shifted == other.shifted;
 }
 
 std::ostream& operator<<(std::ostream& os, const Proof& proof) {
@@ -190,8 +210,8 @@ std::ostream& operator<<(std::ostream& os, const Proof& proof) {
     write_vector(os, proof.c_c);
     write_vector(os, proof.c_s);
     write_vector(os, proof.f);
-    return os << proof.z_a << proof.z_c << proof.z_g << proof.z_s << proof.sender <<
-        proof.values << proof.shifted;
+    return os << proof.z_a << proof.z_c << proof.z_g << proof.z_s
+              << proof.sender << proof.values << proof.shifted;
 }
 
 std::istream& operator>>(std::istream& is, Proof& proof) {
@@ -224,20 +244,32 @@ Proof initialize_proof(const PublicParameters& pp) {
     const std::shared_ptr<ECGroup> group = pp.sender.encryption.group_ctx;
     const std::shared_ptr<Zn> ring = pp.sender.encryption.ring_ctx;
     const std::size_t m = pp.index_g.size();
-    return {ECPoint(group), ECPoint(group), ECPoint(group), ECPoint(group),
-        std::vector<ECPoint>(m, ECPoint(group)), std::vector<ECPoint>(m, ECPoint(group)),
-        ScalarVector(m, ZnElement(ring)), ZnElement(ring), ZnElement(ring), ZnElement(ring),
-            ZnElement(ring),
-        sender_balance::initialize_proof(pp.sender), initialize_range(pp.values_range),
-        initialize_range(pp.shifted_range)};
+    return {
+        ECPoint(group),
+        ECPoint(group),
+        ECPoint(group),
+        ECPoint(group),
+        std::vector<ECPoint>(m, ECPoint(group)),
+        std::vector<ECPoint>(m, ECPoint(group)),
+        ScalarVector(m, ZnElement(ring)),
+        ZnElement(ring),
+        ZnElement(ring),
+        ZnElement(ring),
+        ZnElement(ring),
+        sender_balance::initialize_proof(pp.sender),
+        initialize_range(pp.values_range),
+        initialize_range(pp.shifted_range)
+    };
 }
 
 Proof prove(const PublicParameters& pp,
             const Statement& statement,
             const Witness& witness,
             std::string_view context) {
-    TAIHANG_ASSERT(sender_balance::detail::valid_statement(pp.sender, statement) &&
-        witness.index < pp.sender.participant_count && !witness.secret_key.value.is_zero(),
+    TAIHANG_ASSERT(
+        sender_balance::detail::valid_statement(pp.sender, statement) &&
+            witness.index < pp.sender.participant_count &&
+            !witness.secret_key.value.is_zero(),
         "Solvent invalid statement or sender witness");
     const std::size_t n = pp.sender.participant_count;
     const std::size_t m = pp.index_g.size();
@@ -246,8 +278,12 @@ Proof prove(const PublicParameters& pp,
     const ZnElement zero = ring->get_zero();
     Proof proof = initialize_proof(pp);
     sender_balance::detail::ProverState sender_state{ZnElement(ring)};
-    proof.sender = sender_balance::detail::prove_with_state(pp.sender, statement,
-        {witness.index, witness.secret_key.inv(), witness.post_balance}, sender_state, context);
+    proof.sender = sender_balance::detail::prove_with_state(
+        pp.sender,
+        statement,
+        {witness.index, witness.secret_key.inv(), witness.post_balance},
+        sender_state,
+        context);
     ScalarVector bits(m, zero);
     for (std::size_t b = 0; b < m; ++b) {
         bits[b] = ((witness.index >> b) & 1U) ? one : zero;
@@ -286,10 +322,13 @@ Proof prove(const PublicParameters& pp,
         proof.c_c[degree] = pp.sender.encryption.g * rho[degree];
         proof.c_s[degree] = pp.sender.u * beta[degree];
         for (std::size_t j = 0; j < n; ++j) {
-            proof.c_c[degree] = proof.c_c[degree] + statement.transfers[j].c2 *
-                coefficients[j][degree];
-            proof.c_s[degree] = proof.c_s[degree] + (pp.sender.vector_g[j] +
-                pp.sender.vector_h[j]) * coefficients[j][degree];
+            proof.c_c[degree] =
+                proof.c_c[degree] +
+                statement.transfers[j].c2 * coefficients[j][degree];
+            proof.c_s[degree] =
+                proof.c_s[degree] +
+                (pp.sender.vector_g[j] + pp.sender.vector_h[j]) *
+                    coefficients[j][degree];
         }
         proof.z_g -= rho[degree] * x_power[degree];
         proof.z_s += beta[degree] * x_power[degree];
@@ -297,10 +336,11 @@ Proof prove(const PublicParameters& pp,
     const Aggregates selected = aggregate(pp, statement, proof, x);
     const ECPoint commitment = selected.debit * (-selected.normalization);
     const ZnElement tau = -(proof.z_g * selected.normalization);
-    proof.values = range::prove(pp.values_range, {{commitment}}, {{tau},
-        {-witness.transfer_value}});
-    proof.shifted = range::prove(pp.shifted_range, {{commitment - pp.sender.encryption.h}},
-        {{tau}, {-witness.transfer_value - one}});
+    proof.values = range::prove(
+        pp.values_range, {{commitment}}, {{tau}, {-witness.transfer_value}});
+    proof.shifted = range::prove(pp.shifted_range,
+                                 {{commitment - pp.sender.encryption.h}},
+                                 {{tau}, {-witness.transfer_value - one}});
     return proof;
 }
 
@@ -309,8 +349,8 @@ bool verify(const PublicParameters& pp,
             const Proof& proof,
             std::string_view context) {
     const std::size_t m = folding_rounds(pp.sender.participant_count);
-    if (pp.index_g.size() != m || proof.f.size() != m || proof.c_c.size() != m ||
-        proof.c_s.size() != m ||
+    if (pp.index_g.size() != m || proof.f.size() != m ||
+        proof.c_c.size() != m || proof.c_s.size() != m ||
         !sender_balance::verify(pp.sender, statement, proof.sender, context)) {
         return false;
     }
@@ -322,18 +362,23 @@ bool verify(const PublicParameters& pp,
     for (std::size_t b = 0; b < m; ++b) {
         quadratic[b] = proof.f[b] * (x - proof.f[b]);
     }
-    if (proof.b * x + proof.a != ec_point_msm(pp.index_g, proof.f) + pp.sender.u * proof.z_a ||
-        proof.c * x + proof.d != ec_point_msm(pp.index_g, quadratic) + pp.sender.u * proof.z_c) {
+    if (proof.b * x + proof.a !=
+            ec_point_msm(pp.index_g, proof.f) + pp.sender.u * proof.z_a ||
+        proof.c * x + proof.d !=
+            ec_point_msm(pp.index_g, quadratic) + pp.sender.u * proof.z_c) {
         return false;
     }
     const Aggregates selected = aggregate(pp, statement, proof, x);
     const ScalarVector x_power = powers(m + 1, x);
-    if (proof.sender.s * x_power.back() - selected.selection != pp.sender.u * proof.z_s) {
+    if (proof.sender.s * x_power.back() - selected.selection !=
+        pp.sender.u * proof.z_s) {
         return false;
     }
     const ECPoint commitment = selected.debit * (-selected.normalization);
     return range::verify(pp.values_range, {{commitment}}, proof.values) &&
-        range::verify(pp.shifted_range, {{commitment - pp.sender.encryption.h}}, proof.shifted);
+           range::verify(pp.shifted_range,
+                         {{commitment - pp.sender.encryption.h}},
+                         proof.shifted);
 }
 
 } // namespace taihang::zkp::apgc::solvency

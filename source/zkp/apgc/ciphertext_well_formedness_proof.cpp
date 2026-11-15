@@ -34,7 +34,10 @@ std::istream& operator>>(std::istream& is, Proof& proof) {
 }
 
 Proof initialize_proof(const PublicParameters& pp) {
-    return {ECPoint(pp.encryption.group_ctx), ciphertext_homomorphism::initialize_proof(pp)};
+    return {
+        ECPoint(pp.encryption.group_ctx),
+        ciphertext_homomorphism::initialize_proof(pp)
+    };
 }
 
 Proof prove(const PublicParameters& pp,
@@ -42,15 +45,18 @@ Proof prove(const PublicParameters& pp,
             const Witness& witness,
             std::string_view context) {
     TAIHANG_ASSERT(witness.values.size() == pp.participant_count &&
-        witness.randomness.size() == pp.participant_count,
-            "well-formedness witness length mismatch");
+                       witness.randomness.size() == pp.participant_count,
+                   "well-formedness witness length mismatch");
     std::vector<ZnElement> a = witness.randomness;
     a.insert(a.end(), witness.values.begin(), witness.values.end());
     const ZnElement r = pp.encryption.ring_ctx->gen_random();
     Proof proof = ciphertext_well_formedness::initialize_proof(pp);
     proof.p = ec_point_msm(pp.commitment.vector_g, a) + pp.commitment.u * r;
-    proof.evaluation = ciphertext_homomorphism::prove(pp,
-        {proof.p, statement.public_keys, statement.transfers}, {a, r}, context);
+    proof.evaluation = ciphertext_homomorphism::prove(
+        pp,
+        {proof.p, statement.public_keys, statement.transfers},
+        {a, r},
+        context);
     return proof;
 }
 
@@ -58,7 +64,10 @@ bool verify(const PublicParameters& pp,
             const Statement& statement,
             const Proof& proof,
             std::string_view context) {
-    return ciphertext_homomorphism::verify(pp,
-        {proof.p, statement.public_keys, statement.transfers}, proof.evaluation, context);
+    return ciphertext_homomorphism::verify(
+        pp,
+        {proof.p, statement.public_keys, statement.transfers},
+        proof.evaluation,
+        context);
 }
 } // namespace taihang::zkp::apgc::ciphertext_well_formedness

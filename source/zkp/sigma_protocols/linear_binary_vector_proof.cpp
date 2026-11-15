@@ -56,7 +56,7 @@ ECPoint vector_commitment(const PublicParameters& pp,
     return ec_point_msm(points, scalars);
 }
 
-/** Bind the full public relation and first messages before deriving x. */
+/** Derive x from the caller's context followed by A, C, and D. */
 ZnElement derive_challenge(const PublicParameters& pp,
                            const Statement& statement,
                            const ECPoint& a,
