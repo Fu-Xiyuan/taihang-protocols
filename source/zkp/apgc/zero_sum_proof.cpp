@@ -63,7 +63,9 @@ bool verify(const PublicParameters& pp,
     std::ostringstream transcript;
     transcript << context << statement.c << proof.a;
     const ZnElement x = hash_to_zn(transcript.str(), *pp.encryption.ring_ctx);
-    return pp.encryption.g * proof.z == proof.a + statement.c * x;
+    return ec_point_msm({pp.encryption.g, proof.a, statement.c},
+                        {proof.z, -pp.encryption.ring_ctx->get_one(), -x})
+        .is_at_infinity();
 }
 
 } // namespace taihang::zkp::apgc::zero_sum

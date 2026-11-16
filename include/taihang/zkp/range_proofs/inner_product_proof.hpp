@@ -161,6 +161,26 @@ bool verify(const PublicParameters& pp,
 namespace detail {
 
 /**
+ * @brief Prove with H'_i = H_i*h_factors[i] and u' = u*u_factor.
+ * @note Uses the same context || Statement::p || L/R transcript as prove().
+ * Factors are applied in scalars rather than materializing scaled generators.
+ */
+Proof prove_with_factors(const PublicParameters& pp,
+                         const Statement& statement,
+                         const Witness& witness,
+                         const std::vector<ZnElement>& h_factors,
+                         const ZnElement& u_factor,
+                         std::string_view context = {});
+
+/** @brief Verify the same scaled relation with one final MSM. */
+bool verify_with_factors(const PublicParameters& pp,
+                         const Statement& statement,
+                         const Proof& proof,
+                         const std::vector<ZnElement>& h_factors,
+                         const ZnElement& u_factor,
+                         std::string_view context = {});
+
+/**
  * @brief Prove an inner-product relation embedded in a parent protocol.
  *
  * The parent context must bind every public value that determines the derived

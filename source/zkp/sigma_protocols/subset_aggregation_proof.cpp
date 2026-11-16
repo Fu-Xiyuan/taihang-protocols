@@ -22,6 +22,42 @@
 namespace taihang::zkp::nizk::subset_aggregation {
 namespace {
 
+/** Evaluate both vector terms and the final scalar term in one MSM. */
+ECPoint commit_vectors(const std::vector<ECPoint>& g,
+                       const std::vector<ECPoint>& h,
+                       const ECPoint& u,
+                       const std::vector<ZnElement>& a,
+                       const std::vector<ZnElement>& b,
+                       const ZnElement& r) {
+    std::vector<const ECPoint*> points(g.size() + h.size() + 1, nullptr);
+    std::vector<ZnElement> scalars = a;
+    scalars.insert(scalars.end(), b.begin(), b.end());
+    scalars.push_back(r);
+    for (std::size_t i = 0; i < g.size(); ++i) {
+        points[i] = &g[i];
+    }
+    for (std::size_t i = 0; i < h.size(); ++i) {
+        points[g.size() + i] = &h[i];
+    }
+    points.back() = &u;
+    return ec_point_msm(points, scalars);
+}
+
+/** Include the blinding term in the vector MSM. */
+ECPoint commit_vector(const std::vector<ECPoint>& g,
+                      const ECPoint& u,
+                      const std::vector<ZnElement>& a,
+                      const ZnElement& r) {
+    std::vector<const ECPoint*> points(g.size() + 1, nullptr);
+    std::vector<ZnElement> scalars = a;
+    for (std::size_t i = 0; i < g.size(); ++i) {
+        points[i] = &g[i];
+    }
+    points.back() = &u;
+    scalars.push_back(r);
+    return ec_point_msm(points, scalars);
+}
+
 using taihang::arithmetic::is_pow2;
 using ScalarVector = std::vector<ZnElement>;
 namespace linear_binary = taihang::zkp::nizk::linear_binary_vector;
@@ -243,15 +279,25 @@ Proof prove(const PublicParameters& pp,
     const ZnElement r_b = pp.ring_ctx->gen_random();
     const ZnElement r_p = pp.ring_ctx->gen_random();
     Proof proof{
-        ec_point_msm(pp.index_g, bits) + pp.u * r_b,
-        ec_point_msm(pp.vector_g, selection) + ec_point_msm(pp.vector_h, complement) + pp.u * r_p,
-        {ECPoint(pp.group_ctx), ECPoint(pp.group_ctx), ECPoint(pp.group_ctx),
-         {}, ZnElement(pp.ring_ctx), ZnElement(pp.ring_ctx)},
+        commit_vector(pp.index_g, pp.u, bits, r_b),
+        commit_vectors(
+            pp.vector_g, pp.vector_h, pp.u, selection, complement, r_p),
+        {ECPoint(pp.group_ctx),
+         ECPoint(pp.group_ctx),
+         ECPoint(pp.group_ctx),
+         {},
+         ZnElement(pp.ring_ctx),
+         ZnElement(pp.ring_ctx)},
         std::vector<ECPoint>(pp.index_bits, ECPoint(pp.group_ctx)),
         std::vector<ECPoint>(pp.index_bits, ECPoint(pp.group_ctx)),
-        ZnElement(pp.ring_ctx), ZnElement(pp.ring_ctx),
-        {ECPoint(pp.group_ctx), ECPoint(pp.group_ctx), ECPoint(pp.group_ctx),
-         ZnElement(pp.ring_ctx), ZnElement(pp.ring_ctx), ZnElement(pp.ring_ctx),
+        ZnElement(pp.ring_ctx),
+        ZnElement(pp.ring_ctx),
+        {ECPoint(pp.group_ctx),
+         ECPoint(pp.group_ctx),
+         ECPoint(pp.group_ctx),
+         ZnElement(pp.ring_ctx),
+         ZnElement(pp.ring_ctx),
+         ZnElement(pp.ring_ctx),
          {{}, {}, ZnElement(pp.ring_ctx), ZnElement(pp.ring_ctx)}}
     };
     const linear_binary::PublicParameters linear_pp = linear_binary::setup(pp.group_ctx,
@@ -285,10 +331,10 @@ Proof prove(const PublicParameters& pp,
         selection_bases[j] = pp.vector_g[j] + pp.vector_h[j];
     }
     for (std::size_t degree = 0; degree < pp.index_bits; ++degree) {
-        proof.c_c[degree] = ec_point_msm(statement.commitments, weighted[degree]) +
-                            pp.g * rho[degree];
-        proof.c_p[degree] = ec_point_msm(selection_bases, unweighted[degree]) +
-                            pp.u * alpha[degree];
+        proof.c_c[degree] = commit_vector(
+            statement.commitments, pp.g, weighted[degree], rho[degree]);
+        proof.c_p[degree] = commit_vector(
+            selection_bases, pp.u, unweighted[degree], alpha[degree]);
     }
 
     // Preserve the original selector challenge fixed before coefficient messages.
@@ -362,10 +408,25 @@ bool verify(const PublicParameters& pp,
         coefficients_h[j] = x_power[pp.index_bits] - unweighted[j];
     }
     ScalarVector lower_x(x_power.begin(), x_power.end() - 1);
-    const ECPoint selection = proof.p * x_power[pp.index_bits] +
-        ec_point_msm(pp.vector_g, coefficients_g) + ec_point_msm(pp.vector_h, coefficients_h) +
-        ec_point_msm(proof.c_p, lower_x);
-    if (selection != pp.u * proof.z_p) {
+    std::vector<const ECPoint*> selection_points(
+        2 * pp.statement_count + pp.index_bits + 2, nullptr);
+    ScalarVector selection_scalars = coefficients_g;
+    selection_scalars.insert(
+        selection_scalars.end(), coefficients_h.begin(), coefficients_h.end());
+    selection_scalars.insert(
+        selection_scalars.end(), lower_x.begin(), lower_x.end());
+    selection_scalars.push_back(x_power.back());
+    selection_scalars.push_back(-proof.z_p);
+    for (std::size_t j = 0; j < pp.statement_count; ++j) {
+        selection_points[j] = &pp.vector_g[j];
+        selection_points[pp.statement_count + j] = &pp.vector_h[j];
+    }
+    for (std::size_t degree = 0; degree < pp.index_bits; ++degree) {
+        selection_points[2 * pp.statement_count + degree] = &proof.c_p[degree];
+    }
+    selection_points[selection_points.size() - 2] = &proof.p;
+    selection_points.back() = &pp.u;
+    if (!ec_point_msm(selection_points, selection_scalars).is_at_infinity()) {
         return false;
     }
     const logarithmic_binary::PublicParameters log_pp = logarithmic_parameters(pp);
@@ -402,8 +463,17 @@ Aggregate aggregate(const PublicParameters& pp,
         negative_x[d] = -x_power[d];
     }
     const ZnElement normalization = x_power.back().inv();
-    return {(ec_point_msm(statement.commitments, weights) +
-             ec_point_msm(proof.c_c, negative_x)) * normalization, e_power, normalization};
+    std::vector<const ECPoint*> points(pp.statement_count + pp.index_bits,
+                                       nullptr);
+    for (std::size_t j = 0; j < pp.statement_count; ++j) {
+        points[j] = &statement.commitments[j];
+        weights[j] *= normalization;
+    }
+    for (std::size_t degree = 0; degree < pp.index_bits; ++degree) {
+        points[pp.statement_count + degree] = &proof.c_c[degree];
+        weights.push_back(negative_x[degree] * normalization);
+    }
+    return {ec_point_msm(points, weights), e_power, normalization};
 }
 } // namespace detail
 

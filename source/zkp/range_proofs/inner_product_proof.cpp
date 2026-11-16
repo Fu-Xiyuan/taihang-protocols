@@ -324,6 +324,20 @@ Proof prove(const PublicParameters& pp,
 
 namespace detail {
 
+Proof prove_with_factors(const PublicParameters& pp,
+                         const Statement& statement,
+                         const Witness& witness,
+                         const ScalarVector& h_factors,
+                         const ZnElement& u_factor,
+                         std::string_view context) {
+    std::ostringstream transcript;
+    transcript.write(context.data(),
+                     static_cast<std::streamsize>(context.size()));
+    transcript << statement.p;
+    return prove_from_transcript(
+        pp, witness, std::move(transcript), &h_factors, u_factor);
+}
+
 Proof prove_embedded(const PublicParameters& pp,
                      const Witness& witness,
                      const std::vector<ZnElement>& h_factors,
@@ -340,14 +354,18 @@ Proof prove_embedded(const PublicParameters& pp,
 
 } // namespace detail
 
-bool verify(const PublicParameters& pp,
-            const Statement& statement,
-            const Proof& proof,
-            std::string_view context) {
-    if (pp.g.size() != pp.vector_length ||
-        pp.h.size() != pp.vector_length ||
+namespace {
+
+bool verify_scaled(const PublicParameters& pp,
+                   const Statement& statement,
+                   const Proof& proof,
+                   const ScalarVector* h_factors,
+                   const ZnElement& u_factor,
+                   std::string_view context) {
+    if (pp.g.size() != pp.vector_length || pp.h.size() != pp.vector_length ||
         proof.left.size() != proof.right.size() ||
-        proof.left.size() != pp.rounds) {
+        proof.left.size() != pp.rounds ||
+        (h_factors != nullptr && h_factors->size() != pp.vector_length)) {
         return false;
     }
 
@@ -381,41 +399,51 @@ bool verify(const PublicParameters& pp,
     const ScalarVector s =
         compute_s(x_square, x_inverse, pp.ring_ctx.get(), pp.vector_length);
 
-    // Left side of the final equation:
-    //   g^(a*s) h^(b*s^-1) u^(a*b).
-    const std::size_t final_msm_size = 2 * pp.vector_length + 1;
+    // Evaluate the exact verification equation in one MSM.
+    const std::size_t final_msm_size = 2 * pp.vector_length + 2 * pp.rounds + 2;
     std::vector<const ECPoint*> points(final_msm_size, nullptr);
     ScalarVector scalars(final_msm_size, pp.ring_ctx->get_zero());
-
+    std::size_t cursor = 0;
     for (std::size_t i = 0; i < pp.vector_length; ++i) {
-        points[i] = &pp.g[i];
-        points[pp.vector_length + i] = &pp.h[i];
-        scalars[i] = s[i] * proof.a;
-        // Complementing the binary index flips every challenge exponent:
-        // s[n-1-i] = s[i]^-1.
-        scalars[pp.vector_length + i] =
-            s[pp.vector_length - 1 - i] * proof.b;
+        points[cursor] = &pp.g[i];
+        scalars[cursor++] = s[i] * proof.a;
+        points[cursor] = &pp.h[i];
+        scalars[cursor] = s[pp.vector_length - 1 - i] * proof.b;
+        if (h_factors != nullptr) {
+            scalars[cursor] *= (*h_factors)[i];
+        }
+        ++cursor;
     }
-    points[2 * pp.vector_length] = &pp.u;
-    scalars[2 * pp.vector_length] = proof.a * proof.b;
-    const ECPoint left = ec_point_msm(points, scalars);
-
-    // Right side of the final equation:
-    //   P + sum_j (L_j*x_j^2 + R_j*x_j^-2).
-    points = std::vector<const ECPoint*>(2 * pp.rounds + 1, nullptr);
-    scalars = ScalarVector(2 * pp.rounds + 1,
-                           pp.ring_ctx->get_zero());
+    points[cursor] = &pp.u;
+    scalars[cursor++] = proof.a * proof.b * u_factor;
+    points[cursor] = &statement.p;
+    scalars[cursor++] = -pp.ring_ctx->get_one();
     for (std::size_t round = 0; round < pp.rounds; ++round) {
-        points[round] = &proof.left[round];
-        scalars[round] = x_square[round];
-        points[pp.rounds + 1 + round] = &proof.right[round];
-        scalars[pp.rounds + 1 + round] = x_inverse_square[round];
+        points[cursor] = &proof.left[round];
+        scalars[cursor++] = -x_square[round];
+        points[cursor] = &proof.right[round];
+        scalars[cursor++] = -x_inverse_square[round];
     }
-    points[pp.rounds] = &statement.p;
-    scalars[pp.rounds] = pp.ring_ctx->get_one();
-    const ECPoint right = ec_point_msm(points, scalars);
+    return ec_point_msm(points, scalars).is_at_infinity();
+}
 
-    return left == right;
+} // namespace
+
+bool verify(const PublicParameters& pp,
+            const Statement& statement,
+            const Proof& proof,
+            std::string_view context) {
+    return verify_scaled(
+        pp, statement, proof, nullptr, pp.ring_ctx->get_one(), context);
+}
+
+bool detail::verify_with_factors(const PublicParameters& pp,
+                                 const Statement& statement,
+                                 const Proof& proof,
+                                 const ScalarVector& h_factors,
+                                 const ZnElement& u_factor,
+                                 std::string_view context) {
+    return verify_scaled(pp, statement, proof, &h_factors, u_factor, context);
 }
 
 } // namespace taihang::zkp::range_proofs::inner_product

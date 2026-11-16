@@ -18,6 +18,21 @@
 namespace taihang::zkp::apgc::solvency {
 namespace {
 
+/** Include the blinding term in the vector MSM. */
+ECPoint commit_vector(const std::vector<ECPoint>& g,
+                      const ECPoint& u,
+                      const std::vector<ZnElement>& a,
+                      const ZnElement& r) {
+    std::vector<const ECPoint*> points(g.size() + 1, nullptr);
+    std::vector<ZnElement> scalars = a;
+    for (std::size_t i = 0; i < g.size(); ++i) {
+        points[i] = &g[i];
+    }
+    points.back() = &u;
+    scalars.push_back(r);
+    return ec_point_msm(points, scalars);
+}
+
 std::size_t folding_rounds(std::size_t length) {
     std::size_t rounds = 0;
     for (; length > 1; length /= 2) {
@@ -159,25 +174,38 @@ struct Aggregates {
 Aggregates aggregate(const PublicParameters& pp,
                      const Statement& statement,
                      const Proof& proof,
-                     const ZnElement& x) {
+                     const ZnElement& x,
+                     bool reconstruct_selection = true) {
     const std::size_t n = pp.sender.participant_count;
     const std::size_t m = pp.index_g.size();
     const ScalarVector x_power = powers(m + 1, x);
-    ECPoint g = pp.sender.encryption.group_ctx->get_infinity();
-    ECPoint s = pp.sender.encryption.group_ctx->get_infinity();
+    const std::shared_ptr<Zn> ring = pp.sender.encryption.ring_ctx;
+    std::vector<const ECPoint*> debit_points(n + m, nullptr);
+    ScalarVector debit_scalars(n + m, ring->get_zero());
+    std::vector<const ECPoint*> selection_points(2 * n + m, nullptr);
+    ScalarVector selection_scalars(2 * n + m, ring->get_zero());
     for (std::size_t j = 0; j < n; ++j) {
-        ZnElement value = pp.sender.encryption.ring_ctx->get_one();
+        ZnElement value = ring->get_one();
         for (std::size_t b = 0; b < m; ++b) {
             value *= ((j >> b) & 1U) ? proof.f[b] : x - proof.f[b];
         }
-        g = g + statement.transfers[j].c2 * value;
-        s = s + (pp.sender.vector_g[j] + pp.sender.vector_h[j]) * value -
-            pp.sender.vector_h[j] * x_power.back();
+        debit_points[j] = &statement.transfers[j].c2;
+        debit_scalars[j] = value;
+        selection_points[j] = &pp.sender.vector_g[j];
+        selection_scalars[j] = value;
+        selection_points[n + j] = &pp.sender.vector_h[j];
+        selection_scalars[n + j] = value - x_power.back();
     }
     for (std::size_t degree = 0; degree < m; ++degree) {
-        g = g - proof.c_c[degree] * x_power[degree];
-        s = s - proof.c_s[degree] * x_power[degree];
+        debit_points[n + degree] = &proof.c_c[degree];
+        debit_scalars[n + degree] = -x_power[degree];
+        selection_points[2 * n + degree] = &proof.c_s[degree];
+        selection_scalars[2 * n + degree] = -x_power[degree];
     }
+    const ECPoint g = ec_point_msm(debit_points, debit_scalars);
+    const ECPoint s = reconstruct_selection
+                          ? ec_point_msm(selection_points, selection_scalars)
+                          : pp.sender.encryption.group_ctx->get_infinity();
     return {g, s, x_power.back().inv()};
 }
 
@@ -299,10 +327,10 @@ Proof prove(const PublicParameters& pp,
         c[b] = alpha[b] * (one - bits[b] - bits[b]);
         d[b] = -alpha[b] * alpha[b];
     }
-    proof.b = ec_point_msm(pp.index_g, bits) + pp.sender.u * r_b;
-    proof.a = ec_point_msm(pp.index_g, alpha) + pp.sender.u * r_a;
-    proof.c = ec_point_msm(pp.index_g, c) + pp.sender.u * r_c;
-    proof.d = ec_point_msm(pp.index_g, d) + pp.sender.u * r_d;
+    proof.b = commit_vector(pp.index_g, pp.sender.u, bits, r_b);
+    proof.a = commit_vector(pp.index_g, pp.sender.u, alpha, r_a);
+    proof.c = commit_vector(pp.index_g, pp.sender.u, c, r_c);
+    proof.d = commit_vector(pp.index_g, pp.sender.u, d, r_d);
     const ZnElement x = challenge(pp, statement, proof, context);
     for (std::size_t b = 0; b < m; ++b) {
         proof.f[b] = bits[b] * x + alpha[b];
@@ -319,21 +347,28 @@ Proof prove(const PublicParameters& pp,
     proof.z_g = witness.transfer_randomness * x_power.back();
     proof.z_s = sender_state.r_s * x_power.back();
     for (std::size_t degree = 0; degree < m; ++degree) {
-        proof.c_c[degree] = pp.sender.encryption.g * rho[degree];
-        proof.c_s[degree] = pp.sender.u * beta[degree];
+        std::vector<const ECPoint*> debit_points(n + 1, nullptr);
+        ScalarVector debit_scalars(n + 1, zero);
+        std::vector<const ECPoint*> selection_points(2 * n + 1, nullptr);
+        ScalarVector selection_scalars(2 * n + 1, zero);
         for (std::size_t j = 0; j < n; ++j) {
-            proof.c_c[degree] =
-                proof.c_c[degree] +
-                statement.transfers[j].c2 * coefficients[j][degree];
-            proof.c_s[degree] =
-                proof.c_s[degree] +
-                (pp.sender.vector_g[j] + pp.sender.vector_h[j]) *
-                    coefficients[j][degree];
+            debit_points[j] = &statement.transfers[j].c2;
+            debit_scalars[j] = coefficients[j][degree];
+            selection_points[j] = &pp.sender.vector_g[j];
+            selection_scalars[j] = coefficients[j][degree];
+            selection_points[n + j] = &pp.sender.vector_h[j];
+            selection_scalars[n + j] = coefficients[j][degree];
         }
+        debit_points.back() = &pp.sender.encryption.g;
+        debit_scalars.back() = rho[degree];
+        selection_points.back() = &pp.sender.u;
+        selection_scalars.back() = beta[degree];
+        proof.c_c[degree] = ec_point_msm(debit_points, debit_scalars);
+        proof.c_s[degree] = ec_point_msm(selection_points, selection_scalars);
         proof.z_g -= rho[degree] * x_power[degree];
         proof.z_s += beta[degree] * x_power[degree];
     }
-    const Aggregates selected = aggregate(pp, statement, proof, x);
+    const Aggregates selected = aggregate(pp, statement, proof, x, false);
     const ECPoint commitment = selected.debit * (-selected.normalization);
     const ZnElement tau = -(proof.z_g * selected.normalization);
     proof.values = range::prove(
@@ -362,16 +397,21 @@ bool verify(const PublicParameters& pp,
     for (std::size_t b = 0; b < m; ++b) {
         quadratic[b] = proof.f[b] * (x - proof.f[b]);
     }
-    if (proof.b * x + proof.a !=
-            ec_point_msm(pp.index_g, proof.f) + pp.sender.u * proof.z_a ||
-        proof.c * x + proof.d !=
-            ec_point_msm(pp.index_g, quadratic) + pp.sender.u * proof.z_c) {
+    if (ec_point_msm(
+            proof.b, x, proof.a, pp.sender.encryption.ring_ctx->get_one()) !=
+            commit_vector(pp.index_g, pp.sender.u, proof.f, proof.z_a) ||
+        ec_point_msm(
+            proof.c, x, proof.d, pp.sender.encryption.ring_ctx->get_one()) !=
+            commit_vector(pp.index_g, pp.sender.u, quadratic, proof.z_c)) {
         return false;
     }
     const Aggregates selected = aggregate(pp, statement, proof, x);
     const ScalarVector x_power = powers(m + 1, x);
-    if (proof.sender.s * x_power.back() - selected.selection !=
-        pp.sender.u * proof.z_s) {
+    if (!ec_point_msm({proof.sender.s, selected.selection, pp.sender.u},
+                      {x_power.back(),
+                       -pp.sender.encryption.ring_ctx->get_one(),
+                       -proof.z_s})
+             .is_at_infinity()) {
         return false;
     }
     const ECPoint commitment = selected.debit * (-selected.normalization);

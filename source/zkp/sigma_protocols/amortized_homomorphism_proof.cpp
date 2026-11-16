@@ -84,7 +84,10 @@ std::vector<ECPoint> batched_bases(const PublicParameters& pp,
             evaluation_power[j] *= indices[j];
             coefficients[j] = rho_power[j] * evaluation_power[j];
         }
-        bases[i] = ec_point_msm(statement.c, coefficients);
+        // Keep the original ACF baseline's individual point products and sum.
+        for (std::size_t j = 0; j < n; ++j) {
+            bases[i] = bases[i] + statement.c[j] * coefficients[j];
+        }
     }
     for (std::size_t j = 0; j < n; ++j) {
         bases[degree + j] = pp.g * (-rho_power[j]);
@@ -147,7 +150,7 @@ PublicParameters setup(const std::shared_ptr<ECGroup>& group_ctx,
                    "amortized-homomorphism base context mismatch");
     TAIHANG_ASSERT(!g.is_at_infinity() && !u.is_at_infinity(),
                    "amortized-homomorphism bases cannot be identities");
-    for (const ECPoint& generator : vector_g) {
+    for ([[maybe_unused]] const ECPoint& generator : vector_g) {
         TAIHANG_ASSERT(generator.group_ctx == group_ctx.get(),
                        "amortized-homomorphism generator context mismatch");
     }
@@ -268,7 +271,11 @@ bool verify(const PublicParameters& pp,
     }
     const ScalarVector rho_power = powers(pp.statement_count, rho);
     const std::vector<ECPoint> bases = batched_bases(pp, statement, rho_power);
-    const ECPoint target = ec_point_msm(statement.c, rho_power).neg();
+    ECPoint target = pp.group_ctx->get_infinity();
+    for (std::size_t j = 0; j < pp.statement_count; ++j) {
+        target = target + statement.c[j] * rho_power[j];
+    }
+    target = target.neg();
 
     transcript.str(std::string{});
     transcript << context << proof.a_p << proof.a_f;

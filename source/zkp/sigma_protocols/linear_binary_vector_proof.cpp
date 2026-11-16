@@ -108,7 +108,7 @@ PublicParameters setup(const std::shared_ptr<ECGroup>& group_ctx,
                    "linear-binary-vector base context mismatch");
     TAIHANG_ASSERT(!h.is_at_infinity(),
                    "linear-binary-vector blinding base cannot be an identity");
-    for (const ECPoint& generator : vector_g) {
+    for ([[maybe_unused]] const ECPoint& generator : vector_g) {
         TAIHANG_ASSERT(generator.group_ctx == group_ctx.get(),
                        "linear-binary-vector generator context mismatch");
         TAIHANG_ASSERT(!generator.is_at_infinity(),
@@ -249,7 +249,8 @@ bool verify_with_challenge(const PublicParameters& pp,
 
     // The first equation checks that f opens A + x*P under the same basis.
     const ECPoint opening_left = vector_commitment(pp, proof.f, proof.z_a);
-    const ECPoint opening_right = statement.p * challenge + proof.a;
+    const ECPoint opening_right =
+        ec_point_msm(statement.p, challenge, proof.a, pp.ring_ctx->get_one());
     if (opening_left != opening_right) {
         return false;
     }
@@ -260,7 +261,8 @@ bool verify_with_challenge(const PublicParameters& pp,
         products[i] = proof.f[i] * (challenge - proof.f[i]);
     }
     const ECPoint binary_left = vector_commitment(pp, products, proof.z_c);
-    const ECPoint binary_right = proof.c * challenge + proof.d;
+    const ECPoint binary_right =
+        ec_point_msm(proof.c, challenge, proof.d, pp.ring_ctx->get_one());
     return binary_left == binary_right;
 }
 

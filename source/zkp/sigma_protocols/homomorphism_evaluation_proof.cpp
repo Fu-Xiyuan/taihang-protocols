@@ -16,6 +16,21 @@
 namespace taihang::zkp::nizk::homomorphism_evaluation {
 namespace {
 
+/** Include the blinding term in the vector MSM. */
+ECPoint commit_vector(const std::vector<ECPoint>& g,
+                      const ECPoint& u,
+                      const std::vector<ZnElement>& a,
+                      const ZnElement& r) {
+    std::vector<const ECPoint*> points(g.size() + 1, nullptr);
+    std::vector<ZnElement> scalars = a;
+    for (std::size_t i = 0; i < g.size(); ++i) {
+        points[i] = &g[i];
+    }
+    points.back() = &u;
+    scalars.push_back(r);
+    return ec_point_msm(points, scalars);
+}
+
 namespace equality = taihang::zkp::nizk::multi_exponentiation_equality;
 
 bool valid_dimensions(const PublicParameters& pp, const Statement& statement) {
@@ -111,7 +126,7 @@ Proof prove_with_transcript(const PublicParameters& pp,
     const std::vector<ZnElement> alpha = gen_random_znelement_vector(pp.ring_ctx, pp.vector_length);
     const ZnElement beta = pp.ring_ctx->gen_random();
     Proof proof = detail::initialize_proof(pp);
-    proof.a_p = ec_point_msm(pp.vector_g, alpha) + pp.u * beta;
+    proof.a_p = commit_vector(pp.vector_g, pp.u, alpha, beta);
     proof.a_q = ec_point_msm(statement.bases, alpha);
     std::ostringstream input;
     input << transcript << proof.a_p << proof.a_q;
@@ -124,8 +139,16 @@ Proof prove_with_transcript(const PublicParameters& pp,
     }
     const equality::PublicParameters eq = equality::setup(pp.group_ctx, pp.ring_ctx,
                                                           statement.bases, pp.vector_g);
-    const equality::Statement target{proof.a_q + ec_point_msm(statement.bases, witness.a) * e,
-        statement.p * e + proof.a_p - pp.u * proof.f};
+    std::vector<ZnElement> target_scalars = witness.a;
+    for (ZnElement& value : target_scalars) {
+        value *= e;
+    }
+    const equality::Statement target{
+        commit_vector(
+            statement.bases, proof.a_q, target_scalars, pp.ring_ctx->get_one()),
+        ec_point_msm({statement.p, proof.a_p, pp.u},
+                     {e, pp.ring_ctx->get_one(), -proof.f})
+    };
     transcript = reset_equality_context ? std::string{} : input.str();
     // Reuse the already migrated Eqmdl argument. The parent keeps the original
     // sequence of GL, GR, PL, PR messages when continuing its own transcript.
@@ -156,8 +179,11 @@ bool verify_with_transcript(const PublicParameters& pp,
     const ZnElement e = hash_to_zn(input.str(), *pp.ring_ctx);
     const equality::PublicParameters eq = equality::setup(pp.group_ctx, pp.ring_ctx,
                                                           statement.bases, pp.vector_g);
-    const equality::Statement target{proof.a_q + statement.q * e,
-        statement.p * e + proof.a_p - pp.u * proof.f};
+    const equality::Statement target{
+        ec_point_msm(proof.a_q, pp.ring_ctx->get_one(), statement.q, e),
+        ec_point_msm({statement.p, proof.a_p, pp.u},
+                     {e, pp.ring_ctx->get_one(), -proof.f})
+    };
     transcript = reset_equality_context ? std::string{} : input.str();
     const bool valid = equality::verify(eq, target, proof.equality_proof, transcript);
     std::ostringstream final;

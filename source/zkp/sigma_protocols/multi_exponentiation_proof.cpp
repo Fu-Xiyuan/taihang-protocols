@@ -76,7 +76,7 @@ PublicParameters setup(const std::shared_ptr<ECGroup>& group_ctx,
                    "multi-exponentiation scalar modulus mismatch");
     TAIHANG_ASSERT(is_pow2(generators.size()),
                    "multi-exponentiation length must be a positive power of two");
-    for (const ECPoint& generator : generators) {
+    for ([[maybe_unused]] const ECPoint& generator : generators) {
         TAIHANG_ASSERT(generator.group_ctx == group_ctx.get(),
                        "multi-exponentiation generator context mismatch");
     }
@@ -133,7 +133,8 @@ Proof prove(const PublicParameters& pp,
             const Statement& statement,
             const Witness& witness,
             std::string_view context) {
-    const std::size_t rounds = folding_rounds(pp.vector_length);
+    [[maybe_unused]] const std::size_t rounds =
+        folding_rounds(pp.vector_length);
     TAIHANG_ASSERT(is_pow2(pp.vector_length) &&
                        pp.g.size() == pp.vector_length &&
                        pp.rounds == rounds,
@@ -214,28 +215,45 @@ bool verify(const PublicParameters& pp,
     transcript.write(context.data(),
                      static_cast<std::streamsize>(context.size()));
 
-    ECPoint result = statement.g;
-    std::vector<ECPoint> current_g = pp.g;
+    // Expand the original recursive folds into scalar coefficients.
     const ZnElement one = pp.ring_ctx->get_one();
+    ScalarVector challenges(pp.rounds, one);
+    ScalarVector weights(1, one);
     for (std::size_t round = 0; round < pp.rounds; ++round) {
         transcript << proof.left[round] << proof.right[round];
         ZnElement x = hash_to_zn(transcript.str(), *pp.ring_ctx);
         if (x.value.is_zero()) {
             x = one;
         }
-
-        // G' = x^2*L + x*G + R matches the prover's two vector folds.
-        result = ec_point_msm(
-            {proof.left[round], result, proof.right[round]}, {x * x, x, one});
-        const std::size_t half = current_g.size() / 2;
-        std::vector<ECPoint> next_g(half, ECPoint(pp.group_ctx));
-        for (std::size_t i = 0; i < half; ++i) {
-            next_g[i] = ec_point_msm(current_g[i], x, current_g[half + i], one);
+        challenges[round] = x;
+        const std::size_t previous = weights.size();
+        weights.resize(2 * previous, one);
+        for (std::size_t i = previous; i > 0; --i) {
+            weights[2 * i - 1] = weights[i - 1];
+            weights[2 * i - 2] = weights[i - 1] * x;
         }
-        current_g = std::move(next_g);
     }
-    // This also handles length one, where no folding messages are present.
-    return current_g[0] * proof.a == result;
+    ScalarVector suffix(pp.rounds + 1, one);
+    for (std::size_t round = pp.rounds; round > 0; --round) {
+        suffix[round - 1] = suffix[round] * challenges[round - 1];
+    }
+    std::vector<const ECPoint*> points(pp.vector_length + 2 * pp.rounds + 1,
+                                       nullptr);
+    ScalarVector scalars(points.size(), pp.ring_ctx->get_zero());
+    for (std::size_t i = 0; i < pp.vector_length; ++i) {
+        points[i] = &pp.g[i];
+        scalars[i] = weights[i] * proof.a;
+    }
+    for (std::size_t round = 0; round < pp.rounds; ++round) {
+        points[pp.vector_length + 2 * round] = &proof.left[round];
+        scalars[pp.vector_length + 2 * round] =
+            -challenges[round] * challenges[round] * suffix[round + 1];
+        points[pp.vector_length + 2 * round + 1] = &proof.right[round];
+        scalars[pp.vector_length + 2 * round + 1] = -suffix[round + 1];
+    }
+    points.back() = &statement.g;
+    scalars.back() = -suffix[0];
+    return ec_point_msm(points, scalars).is_at_infinity();
 }
 
 } // namespace taihang::zkp::nizk::multi_exponentiation

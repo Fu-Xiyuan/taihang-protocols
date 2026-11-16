@@ -17,6 +17,42 @@
 namespace taihang::zkp::apgc::sender_balance {
 namespace {
 
+/** Include the blinding term in the vector MSM. */
+ECPoint commit_vector(const std::vector<ECPoint>& g,
+                      const ECPoint& u,
+                      const std::vector<ZnElement>& a,
+                      const ZnElement& r) {
+    std::vector<const ECPoint*> points(g.size() + 1, nullptr);
+    std::vector<ZnElement> scalars = a;
+    for (std::size_t i = 0; i < g.size(); ++i) {
+        points[i] = &g[i];
+    }
+    points.back() = &u;
+    scalars.push_back(r);
+    return ec_point_msm(points, scalars);
+}
+
+/** Commit both vectors and the blinding scalar in one MSM. */
+ECPoint commit_vectors(const std::vector<ECPoint>& g,
+                       const std::vector<ECPoint>& h,
+                       const ECPoint& u,
+                       const std::vector<ZnElement>& a,
+                       const std::vector<ZnElement>& b,
+                       const ZnElement& r) {
+    const std::size_t length = g.size();
+    std::vector<const ECPoint*> points(2 * length + 1, nullptr);
+    std::vector<ZnElement> scalars(points.size(), r.ring_ctx->get_zero());
+    for (std::size_t i = 0; i < length; ++i) {
+        points[i] = &g[i];
+        scalars[i] = a[i];
+        points[length + i] = &h[i];
+        scalars[length + i] = b[i];
+    }
+    points.back() = &u;
+    scalars.back() = r;
+    return ec_point_msm(points, scalars);
+}
+
 std::size_t folding_rounds(std::size_t length) {
     std::size_t rounds = 0;
     for (; length > 1; length /= 2) {
@@ -168,9 +204,9 @@ evaluation::Statement homomorphism_relation(const PublicParameters& pp,
             statement.transfers[j].c1 + statement.balances[j].c1;
         const ECPoint right =
             statement.transfers[j].c2 + statement.balances[j].c2;
-        result.bases[j] = pp.encryption.g * (-rho[3 * j]) +
-                          right * (-rho[3 * j + 1]) +
-                          proof.v * (-rho[3 * j + 2]);
+        result.bases[j] =
+            ec_point_msm({pp.encryption.g, right, proof.v},
+                         {-rho[3 * j], -rho[3 * j + 1], -rho[3 * j + 2]});
         result.bases[n + 2 * j] = ec_point_msm(
             statement.public_keys[j], rho[3 * j], left, rho[3 * j + 1]);
         result.bases[n + 2 * j + 1] =
@@ -301,9 +337,9 @@ Proof detail::prove_with_state(const PublicParameters& pp,
     state.r_s = r_s;
     proof.v = ec_point_msm(
         pp.encryption.g, r_v, pp.encryption.h, witness.post_balance);
-    proof.p = ec_point_msm(commitment_bases(pp, false), y) + pp.u * r_p;
-    proof.s = ec_point_msm(pp.vector_g, selection) +
-              ec_point_msm(pp.vector_h, complement) + pp.u * r_s;
+    proof.p = commit_vector(commitment_bases(pp, false), pp.u, y, r_p);
+    proof.s = commit_vectors(
+        pp.vector_g, pp.vector_h, pp.u, selection, complement, r_s);
     proof.range =
         range::prove(pp.range, {{proof.v}}, {{r_v}, {witness.post_balance}});
     proof.binary = binary::prove(
@@ -314,7 +350,7 @@ Proof detail::prove_with_state(const PublicParameters& pp,
         representation::setup(pp.encryption.group_ctx, ring, bases);
     const ScalarVector alpha = gen_random_znelement_vector(ring, 4 * n);
     const ZnElement beta = ring->gen_random();
-    proof.a_x = ec_point_msm(bases, alpha) + pp.u * beta;
+    proof.a_x = commit_vector(bases, pp.u, alpha, beta);
     std::ostringstream input;
     input << proof.a_x;
     const ZnElement e = hash_to_zn(input.str(), *ring);
@@ -326,7 +362,8 @@ Proof detail::prove_with_state(const PublicParameters& pp,
     }
     proof.representation = representation::prove(
         exp,
-        {(proof.p - proof.s) * e + proof.a_x - pp.u * proof.f},
+        {ec_point_msm({proof.p, proof.s, proof.a_x, pp.u},
+                      {e, -e, pp.encryption.ring_ctx->get_one(), -proof.f})},
         {response});
     std::string transcript(context);
     const evaluation::Statement relation =
@@ -357,7 +394,9 @@ bool verify(const PublicParameters& pp,
                               commitment_bases(pp, true));
     if (!representation::verify(
             exp,
-            {(proof.p - proof.s) * e + proof.a_x - pp.u * proof.f},
+            {ec_point_msm(
+                {proof.p, proof.s, proof.a_x, pp.u},
+                {e, -e, pp.encryption.ring_ctx->get_one(), -proof.f})},
             proof.representation)) {
         return false;
     }

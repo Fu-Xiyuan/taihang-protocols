@@ -20,6 +20,42 @@
 namespace taihang::zkp::apgc::positive_transfer {
 namespace {
 
+/** Include the blinding term in the vector MSM. */
+ECPoint commit_vector(const std::vector<ECPoint>& g,
+                      const ECPoint& u,
+                      const std::vector<ZnElement>& a,
+                      const ZnElement& r) {
+    std::vector<const ECPoint*> points(g.size() + 1, nullptr);
+    std::vector<ZnElement> scalars = a;
+    for (std::size_t i = 0; i < g.size(); ++i) {
+        points[i] = &g[i];
+    }
+    points.back() = &u;
+    scalars.push_back(r);
+    return ec_point_msm(points, scalars);
+}
+
+/** Commit both vectors and the blinding scalar in one MSM. */
+ECPoint commit_vectors(const std::vector<ECPoint>& g,
+                       const std::vector<ECPoint>& h,
+                       const ECPoint& u,
+                       const std::vector<ZnElement>& a,
+                       const std::vector<ZnElement>& b,
+                       const ZnElement& r) {
+    const std::size_t length = g.size();
+    std::vector<const ECPoint*> points(2 * length + 1, nullptr);
+    std::vector<ZnElement> scalars(points.size(), r.ring_ctx->get_zero());
+    for (std::size_t i = 0; i < length; ++i) {
+        points[i] = &g[i];
+        scalars[i] = a[i];
+        points[length + i] = &h[i];
+        scalars[length + i] = b[i];
+    }
+    points.back() = &u;
+    scalars.back() = r;
+    return ec_point_msm(points, scalars);
+}
+
 std::size_t folding_rounds(std::size_t length) {
     std::size_t rounds = 0;
     for (; length > 1; length /= 2) {
@@ -246,12 +282,12 @@ SelectionProof prove_selection(const PublicParameters& pp,
         c[i] = alpha[i] * (one - bits[i] - bits[i]);
         d[i] = -alpha[i] * alpha[i];
     }
-    proof.b = ec_point_msm(pp.index_g, bits) + pp.u * r_b;
-    proof.p = ec_point_msm(pp.vector_g, selected) +
-              ec_point_msm(pp.vector_h, complement) + pp.u * r_p;
-    proof.a = ec_point_msm(pp.index_g, alpha) + pp.u * r_a;
-    proof.c = ec_point_msm(pp.index_g, c) + pp.u * r_c;
-    proof.d = ec_point_msm(pp.index_g, d) + pp.u * r_d;
+    proof.b = commit_vector(pp.index_g, pp.u, bits, r_b);
+    proof.p = commit_vectors(
+        pp.vector_g, pp.vector_h, pp.u, selected, complement, r_p);
+    proof.a = commit_vector(pp.index_g, pp.u, alpha, r_a);
+    proof.c = commit_vector(pp.index_g, pp.u, c, r_c);
+    proof.d = commit_vector(pp.index_g, pp.u, d, r_d);
     const ZnElement x = selection_x(pp, proof, context);
     for (std::size_t i = 0; i < k * m; ++i) {
         proof.f[i] = bits[i] * x + alpha[i];
@@ -285,11 +321,12 @@ SelectionProof prove_selection(const PublicParameters& pp,
     proof.z_g *= x_power[m];
     proof.z_p = r_p * x_power[m];
     for (std::size_t degree = 0; degree < m; ++degree) {
-        proof.c_c[degree] =
-            pp.encryption.g * rho[degree] +
-            ec_point_msm(statement.commitments, weighted[degree]);
-        proof.c_p[degree] = pp.u * beta[degree] +
-                            ec_point_msm(selection_bases, unweighted[degree]);
+        proof.c_c[degree] = commit_vector(statement.commitments,
+                                          pp.encryption.g,
+                                          weighted[degree],
+                                          rho[degree]);
+        proof.c_p[degree] = commit_vector(
+            selection_bases, pp.u, unweighted[degree], beta[degree]);
         proof.z_g -= rho[degree] * x_power[degree];
         proof.z_p += beta[degree] * x_power[degree];
     }
@@ -307,12 +344,19 @@ struct Aggregate {
 Aggregate aggregate(const PublicParameters& pp,
                     const Statement& statement,
                     const SelectionProof& proof,
-                    std::string_view context) {
+                    std::string_view context,
+                    bool reconstruct = true) {
     const std::shared_ptr<Zn> ring = pp.encryption.ring_ctx;
     const ZnElement x = selection_x(pp, proof, context);
     const ScalarVector x_power = powers(pp.index_bits + 1, x);
     const ScalarVector e_power =
         powers(pp.receiver_count, selection_e(pp, proof));
+    const ZnElement normalization = x_power.back().inv();
+    if (!reconstruct) {
+        return {
+            pp.encryption.group_ctx->get_infinity(), e_power, normalization
+        };
+    }
     ScalarVector weighted(pp.participant_count, ring->get_zero());
     for (std::size_t i = 0; i < pp.receiver_count; ++i) {
         for (std::size_t j = 0; j < pp.participant_count; ++j) {
@@ -324,12 +368,17 @@ Aggregate aggregate(const PublicParameters& pp,
             weighted[j] += e_power[i] * value;
         }
     }
-    ECPoint g = ec_point_msm(statement.commitments, weighted);
-    for (std::size_t degree = 0; degree < pp.index_bits; ++degree) {
-        g = g - proof.c_c[degree] * x_power[degree];
+    std::vector<const ECPoint*> points(pp.participant_count + pp.index_bits,
+                                       nullptr);
+    for (std::size_t j = 0; j < pp.participant_count; ++j) {
+        points[j] = &statement.commitments[j];
+        weighted[j] *= normalization;
     }
-    const ZnElement normalization = x_power.back().inv();
-    return {g * normalization, e_power, normalization};
+    for (std::size_t degree = 0; degree < pp.index_bits; ++degree) {
+        points[pp.participant_count + degree] = &proof.c_c[degree];
+        weighted.push_back(-x_power[degree] * normalization);
+    }
+    return {ec_point_msm(points, weighted), e_power, normalization};
 }
 
 bool verify_selection(const PublicParameters& pp,
@@ -346,15 +395,17 @@ bool verify_selection(const PublicParameters& pp,
     for (std::size_t i = 0; i < quadratic.size(); ++i) {
         quadratic[i] = proof.f[i] * (x - proof.f[i]);
     }
-    if (proof.b * x + proof.a !=
-            ec_point_msm(pp.index_g, proof.f) + pp.u * proof.z_a ||
-        proof.c * x + proof.d !=
-            ec_point_msm(pp.index_g, quadratic) + pp.u * proof.z_c) {
+    if (ec_point_msm(proof.b, x, proof.a, pp.encryption.ring_ctx->get_one()) !=
+            commit_vector(pp.index_g, pp.u, proof.f, proof.z_a) ||
+        ec_point_msm(proof.c, x, proof.d, pp.encryption.ring_ctx->get_one()) !=
+            commit_vector(pp.index_g, pp.u, quadratic, proof.z_c)) {
         return false;
     }
     const ScalarVector x_power = powers(pp.index_bits + 1, x);
-    ECPoint s = pp.encryption.group_ctx->get_infinity();
-    for (std::size_t j = 0; j < pp.participant_count; ++j) {
+    const std::size_t n = pp.participant_count;
+    std::vector<const ECPoint*> points(2 * n + pp.index_bits + 2, nullptr);
+    ScalarVector scalars(points.size(), pp.encryption.ring_ctx->get_zero());
+    for (std::size_t j = 0; j < n; ++j) {
         ZnElement sum = pp.encryption.ring_ctx->get_zero();
         for (std::size_t i = 0; i < pp.receiver_count; ++i) {
             ZnElement value = pp.encryption.ring_ctx->get_one();
@@ -364,13 +415,20 @@ bool verify_selection(const PublicParameters& pp,
             }
             sum += value;
         }
-        s = s + (pp.vector_g[j] + pp.vector_h[j]) * sum -
-            pp.vector_h[j] * x_power.back();
+        points[j] = &pp.vector_g[j];
+        points[n + j] = &pp.vector_h[j];
+        scalars[j] = -sum;
+        scalars[n + j] = x_power.back() - sum;
     }
     for (std::size_t degree = 0; degree < pp.index_bits; ++degree) {
-        s = s - proof.c_p[degree] * x_power[degree];
+        points[2 * n + degree] = &proof.c_p[degree];
+        scalars[2 * n + degree] = x_power[degree];
     }
-    return proof.p * x_power.back() - s == pp.u * proof.z_p &&
+    points[points.size() - 2] = &proof.p;
+    scalars[scalars.size() - 2] = x_power.back();
+    points.back() = &pp.u;
+    scalars.back() = -proof.z_p;
+    return ec_point_msm(points, scalars).is_at_infinity() &&
            logarithmic::verify(
                logarithmic_parameters(pp), {proof.p}, proof.binary);
 }
@@ -400,10 +458,10 @@ range::Proof prove_range(const range::PublicParameters& pp,
     const ZnElement alpha = ring->gen_random();
     const ZnElement rho = ring->gen_random();
     range::Proof proof = initialize_range(pp);
-    proof.a = ec_point_msm(pp.vector_g, a_left) +
-              ec_point_msm(pp.vector_h, a_right) + pp.h * alpha;
-    proof.s = ec_point_msm(pp.vector_g, s_left) +
-              ec_point_msm(pp.vector_h, s_right) + pp.h * rho;
+    proof.a =
+        commit_vectors(pp.vector_g, pp.vector_h, pp.h, a_left, a_right, alpha);
+    proof.s =
+        commit_vectors(pp.vector_g, pp.vector_h, pp.h, s_left, s_right, rho);
     std::ostringstream transcript;
     transcript << proof.a;
     const ZnElement y = hash_to_zn(transcript.str(), *ring);
@@ -430,11 +488,9 @@ range::Proof prove_range(const range::PublicParameters& pp,
     const ZnElement x = hash_to_zn(transcript.str(), *ring);
     ScalarVector l(length, zero);
     ScalarVector r(length, zero);
-    std::vector<ECPoint> h(length, ECPoint(pp.group_ctx));
     for (std::size_t i = 0; i < length; ++i) {
         l[i] = l0[i] + s_left[i] * x;
         r[i] = r0[i] + r1[i] * x;
-        h[i] = pp.vector_h[i] * inverse_y[i];
     }
     proof.t = dot(l, r);
     proof.taux = tau1 * x + tau2 * x * x + z * z * randomness;
@@ -448,12 +504,17 @@ range::Proof prove_range(const range::PublicParameters& pp,
         pp.group_ctx,
         ring,
         pp.vector_g,
-        h,
-        pp.u * e
+        pp.vector_h,
+        pp.u
     };
+    ScalarVector scaled_r(length, zero);
+    for (std::size_t i = 0; i < length; ++i) {
+        scaled_r[i] = r[i] * inverse_y[i];
+    }
     const ECPoint p =
-        ec_point_msm(ip.g, l) + ec_point_msm(ip.h, r) + ip.u * proof.t;
-    proof.inner_product = inner::prove(ip, {p}, {l, r}, transcript.str());
+        commit_vectors(ip.g, ip.h, ip.u, l, scaled_r, e * proof.t);
+    proof.inner_product = inner::detail::prove_with_factors(
+        ip, {p}, {l, r}, inverse_y, e, transcript.str());
     return proof;
 }
 
@@ -494,17 +555,29 @@ bool verify_range(const range::PublicParameters& pp,
         sum_coefficients += coefficients[i];
     }
     const ZnElement delta = (z - z * z) * sum_y - z * sum_coefficients;
-    if (ec_point_msm(pp.g, proof.taux, pp.h, proof.t) !=
-        commitment * (z * z) + pp.h * delta +
-            ec_point_msm(proof.t1, x, proof.t2, x * x)) {
+    if (!ec_point_msm({pp.g, pp.h, commitment, proof.t1, proof.t2},
+                      {proof.taux, proof.t - delta, -z * z, -x, -x * x})
+             .is_at_infinity()) {
         return false;
     }
-    std::vector<ECPoint> h(length, ECPoint(pp.group_ctx));
-    ECPoint p = proof.a + proof.s * x - pp.h * proof.mu;
+    // Preserve the original public point hashed by the IPA, using one MSM.
+    std::vector<const ECPoint*> points(2 * length + 4, nullptr);
+    ScalarVector scalars(points.size(), ring->get_zero());
     for (std::size_t i = 0; i < length; ++i) {
-        h[i] = pp.vector_h[i] * inverse_y[i];
-        p = p - pp.vector_g[i] * z + h[i] * (y_power[i] * z + coefficients[i]);
+        points[i] = &pp.vector_g[i];
+        scalars[i] = -z;
+        points[length + i] = &pp.vector_h[i];
+        scalars[length + i] = z + inverse_y[i] * coefficients[i];
     }
+    points[2 * length] = &proof.a;
+    scalars[2 * length] = ring->get_one();
+    points[2 * length + 1] = &proof.s;
+    scalars[2 * length + 1] = x;
+    points[2 * length + 2] = &pp.h;
+    scalars[2 * length + 2] = -proof.mu;
+    points[2 * length + 3] = &pp.u;
+    scalars[2 * length + 3] = e * proof.t;
+    const ECPoint p = ec_point_msm(points, scalars);
     const inner::PublicParameters ip{
         pp.curve_id,
         length,
@@ -512,11 +585,11 @@ bool verify_range(const range::PublicParameters& pp,
         pp.group_ctx,
         ring,
         pp.vector_g,
-        h,
-        pp.u * e
+        pp.vector_h,
+        pp.u
     };
-    return inner::verify(
-        ip, {p + ip.u * proof.t}, proof.inner_product, transcript.str());
+    return inner::detail::verify_with_factors(
+        ip, {p}, proof.inner_product, inverse_y, e, transcript.str());
 }
 
 } // namespace
@@ -642,7 +715,8 @@ Proof prove(const PublicParameters& pp,
                    "Positive statement or witness dimensions mismatch");
     Proof proof = initialize_proof(pp);
     proof.subset = prove_selection(pp, statement, witness, context);
-    const Aggregate selected = aggregate(pp, statement, proof.subset, context);
+    const Aggregate selected =
+        aggregate(pp, statement, proof.subset, context, false);
     const ZnElement tau = proof.subset.z_g * selected.normalization;
     proof.values =
         prove_range(pp.values_range, selected.weights, witness.values, tau);

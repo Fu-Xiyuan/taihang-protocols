@@ -11,6 +11,24 @@
 #include <taihang/common/check.hpp>
 
 namespace taihang::zkp::apgc::ciphertext_well_formedness {
+namespace {
+
+/** Include the blinding term in the vector MSM. */
+ECPoint commit_vector(const std::vector<ECPoint>& g,
+                      const ECPoint& u,
+                      const std::vector<ZnElement>& a,
+                      const ZnElement& r) {
+    std::vector<const ECPoint*> points(g.size() + 1, nullptr);
+    std::vector<ZnElement> scalars = a;
+    for (std::size_t i = 0; i < g.size(); ++i) {
+        points[i] = &g[i];
+    }
+    points.back() = &u;
+    scalars.push_back(r);
+    return ec_point_msm(points, scalars);
+}
+
+} // namespace
 
 PublicParameters setup(const pke::twisted_elgamal::PublicParameters& encryption,
                        std::size_t count) {
@@ -51,7 +69,7 @@ Proof prove(const PublicParameters& pp,
     a.insert(a.end(), witness.values.begin(), witness.values.end());
     const ZnElement r = pp.encryption.ring_ctx->gen_random();
     Proof proof = ciphertext_well_formedness::initialize_proof(pp);
-    proof.p = ec_point_msm(pp.commitment.vector_g, a) + pp.commitment.u * r;
+    proof.p = commit_vector(pp.commitment.vector_g, pp.commitment.u, a, r);
     proof.evaluation = ciphertext_homomorphism::prove(
         pp,
         {proof.p, statement.public_keys, statement.transfers},

@@ -17,6 +17,42 @@
 namespace taihang::zkp::apgc::inactive_participant {
 namespace {
 
+/** Include the blinding term in the vector MSM. */
+ECPoint commit_vector(const std::vector<ECPoint>& g,
+                      const ECPoint& u,
+                      const std::vector<ZnElement>& a,
+                      const ZnElement& r) {
+    std::vector<const ECPoint*> points(g.size() + 1, nullptr);
+    std::vector<ZnElement> scalars = a;
+    for (std::size_t i = 0; i < g.size(); ++i) {
+        points[i] = &g[i];
+    }
+    points.back() = &u;
+    scalars.push_back(r);
+    return ec_point_msm(points, scalars);
+}
+
+/** Commit both vectors and the blinding scalar in one MSM. */
+ECPoint commit_vectors(const std::vector<ECPoint>& g,
+                       const std::vector<ECPoint>& h,
+                       const ECPoint& u,
+                       const std::vector<ZnElement>& a,
+                       const std::vector<ZnElement>& b,
+                       const ZnElement& r) {
+    const std::size_t length = g.size();
+    std::vector<const ECPoint*> points(2 * length + 1, nullptr);
+    std::vector<ZnElement> scalars(points.size(), r.ring_ctx->get_zero());
+    for (std::size_t i = 0; i < length; ++i) {
+        points[i] = &g[i];
+        scalars[i] = a[i];
+        points[length + i] = &h[i];
+        scalars[length + i] = b[i];
+    }
+    points.back() = &u;
+    scalars.back() = r;
+    return ec_point_msm(points, scalars);
+}
+
 std::size_t folding_rounds(std::size_t length) {
     std::size_t rounds = 0;
     for (; length > 1; length /= 2) {
@@ -107,7 +143,10 @@ inner::PublicParameters inner_parameters(const PublicParameters& pp,
     std::vector<ECPoint> g(pp.participant_count,
                            ECPoint(pp.encryption.group_ctx));
     for (std::size_t i = 0; i < pp.participant_count; ++i) {
-        g[i] = pp.vector_g[i] * inverse_y[i] + statement.commitments[i];
+        g[i] = ec_point_msm(pp.vector_g[i],
+                            inverse_y[i],
+                            statement.commitments[i],
+                            pp.encryption.ring_ctx->get_one());
     }
     return inner_parameters(pp.encryption, g, pp.vector_h, pp.u * e);
 }
@@ -188,10 +227,10 @@ Proof prove(const PublicParameters& pp,
         a_right[i] = witness.bits[i] - one;
     }
     Proof proof = initialize_proof(pp);
-    proof.a = ec_point_msm(pp.vector_g, witness.bits) +
-              ec_point_msm(pp.vector_h, a_right) + pp.u * alpha;
-    proof.s = ec_point_msm(pp.vector_g, s_left) +
-              ec_point_msm(pp.vector_h, s_right) + pp.u * beta;
+    proof.a = commit_vectors(
+        pp.vector_g, pp.vector_h, pp.u, witness.bits, a_right, alpha);
+    proof.s =
+        commit_vectors(pp.vector_g, pp.vector_h, pp.u, s_left, s_right, beta);
     std::ostringstream transcript;
     transcript << context << proof.a;
     const ZnElement y = hash_to_zn(transcript.str(), *ring);
@@ -214,7 +253,7 @@ Proof prove(const PublicParameters& pp,
     proof.t1 = ec_point_msm(pp.encryption.g, t1, pp.encryption.h, tau1);
     proof.t2 = ec_point_msm(pp.encryption.g, t2, pp.encryption.h, tau2);
     const ZnElement r_s = ring->gen_random();
-    proof.e = ec_point_msm(statement.commitments, l1) - pp.encryption.g * r_s;
+    proof.e = commit_vector(statement.commitments, pp.encryption.g, l1, -r_s);
     transcript << proof.t1 << proof.t2 << proof.e;
     const ZnElement x = hash_to_zn(transcript.str(), *ring);
     ScalarVector l(n, ring->get_zero());
@@ -241,8 +280,7 @@ Proof prove(const PublicParameters& pp,
     const ZnElement e = hash_to_zn(transcript.str(), *ring);
     const inner::PublicParameters ip =
         inner_parameters(pp, statement, inverse_y, e);
-    const ECPoint p =
-        ec_point_msm(ip.g, l) + ec_point_msm(ip.h, r) + ip.u * proof.t;
+    const ECPoint p = commit_vectors(ip.g, ip.h, ip.u, l, r, proof.t);
     proof.inner_product = inner::prove(ip, {p}, {l, r}, transcript.str());
     return proof;
 }
@@ -280,23 +318,37 @@ bool verify(const PublicParameters& pp,
     const ZnElement n(ring, BigInt(uint64_t{pp.participant_count}));
     const ZnElement count(ring, BigInt(uint64_t{statement.count}));
     const ZnElement delta = (z - z * z) * sum_y - z * z * z * n;
-    const ECPoint left =
-        ec_point_msm(pp.encryption.g, proof.t, pp.encryption.h, proof.taux);
-    const ECPoint right = pp.encryption.g * (delta + z * z * count) +
-                          ec_point_msm(proof.t1, x, proof.t2, x * x);
-    if (left != right) {
+    if (!ec_point_msm({pp.encryption.g, pp.encryption.h, proof.t1, proof.t2},
+                      {proof.t - delta - z * z * count, proof.taux, -x, -x * x})
+             .is_at_infinity()) {
         return false;
     }
     const inner::PublicParameters ip =
         inner_parameters(pp, statement, inverse_y, e);
-    ECPoint p = proof.a + proof.s * x + pp.encryption.g * proof.f_s -
-                pp.u * proof.mu + proof.e * x;
-    for (std::size_t i = 0; i < pp.participant_count; ++i) {
-        p = p - pp.vector_g[i] * z +
-            pp.vector_h[i] * (z + z * z * inverse_y[i]) -
-            statement.commitments[i] * (z * y_power[i]);
+    const std::size_t length = pp.participant_count;
+    std::vector<const ECPoint*> points(3 * length + 6, nullptr);
+    ScalarVector scalars(points.size(), ring->get_zero());
+    for (std::size_t i = 0; i < length; ++i) {
+        points[i] = &pp.vector_g[i];
+        scalars[i] = -z;
+        points[length + i] = &pp.vector_h[i];
+        scalars[length + i] = z + z * z * inverse_y[i];
+        points[2 * length + i] = &statement.commitments[i];
+        scalars[2 * length + i] = -z * y_power[i];
     }
-    p = p + ip.u * proof.t;
+    points[3 * length] = &proof.a;
+    scalars[3 * length] = ring->get_one();
+    points[3 * length + 1] = &proof.s;
+    scalars[3 * length + 1] = x;
+    points[3 * length + 2] = &pp.encryption.g;
+    scalars[3 * length + 2] = proof.f_s;
+    points[3 * length + 3] = &pp.u;
+    scalars[3 * length + 3] = -proof.mu;
+    points[3 * length + 4] = &proof.e;
+    scalars[3 * length + 4] = x;
+    points[3 * length + 5] = &ip.u;
+    scalars[3 * length + 5] = proof.t;
+    const ECPoint p = ec_point_msm(points, scalars);
     return inner::verify(ip, {p}, proof.inner_product, transcript.str());
 }
 

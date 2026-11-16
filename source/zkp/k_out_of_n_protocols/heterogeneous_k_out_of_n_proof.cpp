@@ -21,6 +21,42 @@
 namespace taihang::zkp::k_out_of_n::heterogeneous {
 namespace {
 
+/** Include the blinding term in the vector MSM. */
+ECPoint commit_vector(const std::vector<ECPoint>& g,
+                      const ECPoint& u,
+                      const std::vector<ZnElement>& a,
+                      const ZnElement& r) {
+    std::vector<const ECPoint*> points(g.size() + 1, nullptr);
+    std::vector<ZnElement> scalars = a;
+    for (std::size_t i = 0; i < g.size(); ++i) {
+        points[i] = &g[i];
+    }
+    points.back() = &u;
+    scalars.push_back(r);
+    return ec_point_msm(points, scalars);
+}
+
+/** Commit both vectors and the blinding scalar in one MSM. */
+ECPoint commit_vectors(const std::vector<ECPoint>& g,
+                       const std::vector<ECPoint>& h,
+                       const ECPoint& u,
+                       const std::vector<ZnElement>& a,
+                       const std::vector<ZnElement>& b,
+                       const ZnElement& r) {
+    const std::size_t length = g.size();
+    std::vector<const ECPoint*> points(2 * length + 1, nullptr);
+    std::vector<ZnElement> scalars(points.size(), r.ring_ctx->get_zero());
+    for (std::size_t i = 0; i < length; ++i) {
+        points[i] = &g[i];
+        scalars[i] = a[i];
+        points[length + i] = &h[i];
+        scalars[length + i] = b[i];
+    }
+    points.back() = &u;
+    scalars.back() = r;
+    return ec_point_msm(points, scalars);
+}
+
 using ScalarVector = std::vector<ZnElement>;
 namespace binary = taihang::zkp::nizk::fixed_weight_binary_vector;
 namespace representation = taihang::zkp::nizk::multi_exponentiation;
@@ -242,9 +278,13 @@ ProverState prepare(const PublicParameters& pp, const Witness& witness) {
             state.y[pp.statement_count + j * pp.opening_length + a] = witness.openings[i][a];
         }
     }
-    state.p = ec_point_msm(cp.vector_g, state.y) + cp.u * state.r_p;
-    state.s = ec_point_msm(pp.selection.vector_g, state.selection) +
-        ec_point_msm(pp.selection.vector_h, state.complement) + cp.u * state.r_s;
+    state.p = commit_vector(cp.vector_g, cp.u, state.y, state.r_p);
+    state.s = commit_vectors(pp.selection.vector_g,
+                             pp.selection.vector_h,
+                             cp.u,
+                             state.selection,
+                             state.complement,
+                             state.r_s);
     return state;
 }
 
@@ -297,7 +337,7 @@ Proof prove_prepared(const PublicParameters& pp,
     const ScalarVector alpha = gen_random_znelement_vector(
         pp.commitment.ring_ctx, projection.vector_length);
     const ZnElement beta = pp.commitment.ring_ctx->gen_random();
-    proof.a_x = ec_point_msm(projection.g, alpha) + pp.selection.u * beta;
+    proof.a_x = commit_vector(projection.g, pp.selection.u, alpha, beta);
     std::ostringstream transcript;
     transcript << proof.a_x;
     const ZnElement e = hash_to_zn(transcript.str(), *pp.commitment.ring_ctx);
@@ -306,8 +346,10 @@ Proof prove_prepared(const PublicParameters& pp,
     for (std::size_t i = 0; i < response.size(); ++i) {
         response[i] += e * difference[i];
     }
-    proof.consistency = representation::prove(projection,
-        {(state.p - state.s) * e + proof.a_x - pp.selection.u * proof.f},
+    proof.consistency = representation::prove(
+        projection,
+        {ec_point_msm({state.p, state.s, proof.a_x, pp.selection.u},
+                      {e, -e, pp.commitment.ring_ctx->get_one(), -proof.f})},
         {response});
     std::vector<std::vector<ECPoint>> rows = relation_bases(pp, statement, parent);
     if (bridge_bases) {
@@ -348,9 +390,12 @@ bool verify_extended(const PublicParameters& pp,
     std::ostringstream transcript;
     transcript << proof.a_x;
     const ZnElement e = hash_to_zn(transcript.str(), *pp.commitment.ring_ctx);
-    if (!representation::verify(projection,
-        {(proof.p - proof.s) * e + proof.a_x - pp.selection.u * proof.f},
-        proof.consistency)) {
+    if (!representation::verify(
+            projection,
+            {ec_point_msm(
+                {proof.p, proof.s, proof.a_x, pp.selection.u},
+                {e, -e, pp.commitment.ring_ctx->get_one(), -proof.f})},
+            proof.consistency)) {
         return false;
     }
     std::vector<std::vector<ECPoint>> rows = relation_bases(pp, statement, parent);

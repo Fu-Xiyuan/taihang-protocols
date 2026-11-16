@@ -101,4 +101,62 @@ TEST(InnerProductProofStandaloneTest, HandlesSingleElementVector) {
     EXPECT_TRUE(ip::verify(pp, statement, proof));
 }
 
+TEST_F(InnerProductProofTest, AcceptsFactoredGeneratorsAndRejectsTampering) {
+    std::vector<ZnElement> factors(pp.vector_length, pp.ring_ctx->get_one());
+    ZnElement inner = pp.ring_ctx->get_zero();
+    std::vector<ECPoint> points = pp.g;
+    points.insert(points.end(), pp.h.begin(), pp.h.end());
+    points.push_back(pp.u);
+    std::vector<ZnElement> scalars = witness.a;
+    for (std::size_t i = 0; i < pp.vector_length; ++i) {
+        factors[i] = ZnElement(pp.ring_ctx, BigInt(uint64_t{i + 2}));
+        scalars.push_back(witness.b[i] * factors[i]);
+        inner += witness.a[i] * witness.b[i];
+    }
+    const ZnElement u_factor(pp.ring_ctx, BigInt(uint64_t{11}));
+    scalars.push_back(inner * u_factor);
+    const ip::Statement scaled{ec_point_msm(points, scalars)};
+    ip::Proof proof = ip::detail::prove_with_factors(
+        pp, scaled, witness, factors, u_factor, "factored-test");
+    EXPECT_TRUE(ip::detail::verify_with_factors(
+        pp, scaled, proof, factors, u_factor, "factored-test"));
+    EXPECT_FALSE(ip::detail::verify_with_factors(
+        pp, scaled, proof, factors, u_factor, "different-context"));
+    EXPECT_FALSE(ip::detail::verify_with_factors(
+        pp, {scaled.p + pp.g[0]}, proof, factors, u_factor, "factored-test"));
+    EXPECT_FALSE(
+        ip::detail::verify_with_factors(pp,
+                                        scaled,
+                                        proof,
+                                        factors,
+                                        u_factor + pp.ring_ctx->get_one(),
+                                        "factored-test"));
+    factors[0] += pp.ring_ctx->get_one();
+    EXPECT_FALSE(ip::detail::verify_with_factors(
+        pp, scaled, proof, factors, u_factor, "factored-test"));
+    factors.pop_back();
+    EXPECT_FALSE(ip::detail::verify_with_factors(
+        pp, scaled, proof, factors, u_factor, "factored-test"));
+}
+
+TEST(InnerProductProofStandaloneTest, FactoredSingleElementAndZeroFactors) {
+    const auto pp = ip::setup(NID_X9_62_prime256v1, 1);
+    const ip::Witness witness{
+        {ZnElement(pp.ring_ctx, BigInt(uint64_t{7}))},
+        {ZnElement(pp.ring_ctx, BigInt(uint64_t{9}))}
+    };
+    for (const uint64_t value : {uint64_t{0}, uint64_t{5}}) {
+        const ZnElement factor(pp.ring_ctx, BigInt(value));
+        const ip::Statement statement{ec_point_msm(
+            {pp.g[0], pp.h[0], pp.u},
+            {witness.a[0],
+             witness.b[0] * factor,
+             witness.a[0] * witness.b[0] * factor})};
+        const ip::Proof proof = ip::detail::prove_with_factors(
+            pp, statement, witness, {factor}, factor);
+        EXPECT_TRUE(ip::detail::verify_with_factors(
+            pp, statement, proof, {factor}, factor));
+    }
+}
+
 } // namespace

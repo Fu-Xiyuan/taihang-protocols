@@ -21,6 +21,27 @@
 namespace taihang::zkp::nizk::fixed_weight_binary_vector {
 namespace {
 
+/** Commit both vectors and the blinding scalar in one MSM. */
+ECPoint commit_vectors(const std::vector<ECPoint>& g,
+                       const std::vector<ECPoint>& h,
+                       const ECPoint& u,
+                       const std::vector<ZnElement>& a,
+                       const std::vector<ZnElement>& b,
+                       const ZnElement& r) {
+    const std::size_t length = g.size();
+    std::vector<const ECPoint*> points(2 * length + 1, nullptr);
+    std::vector<ZnElement> scalars(points.size(), r.ring_ctx->get_zero());
+    for (std::size_t i = 0; i < length; ++i) {
+        points[i] = &g[i];
+        scalars[i] = a[i];
+        points[length + i] = &h[i];
+        scalars[length + i] = b[i];
+    }
+    points.back() = &u;
+    scalars.back() = r;
+    return ec_point_msm(points, scalars);
+}
+
 using taihang::arithmetic::is_pow2;
 using ScalarVector = std::vector<ZnElement>;
 namespace inner_product = taihang::zkp::range_proofs::inner_product;
@@ -105,11 +126,9 @@ ECPoint unblinded_commitment(const PublicParameters& pp,
     return ec_point_msm(points, scalars);
 }
 
-/** Reuse parent contexts with h'_i = h_i*y^-i and u' = u_ip*e. */
+/** Reuse unscaled parent bases; the IPA absorbs public factors into scalars. */
 inner_product::PublicParameters make_inner_product_parameters(
-    const PublicParameters& pp,
-    const ScalarVector& y_inverse_power,
-    const ZnElement& e) {
+    const PublicParameters& pp) {
     inner_product::PublicParameters ip_pp;
     ip_pp.curve_id = pp.curve_id;
     ip_pp.vector_length = pp.vector_length;
@@ -117,11 +136,8 @@ inner_product::PublicParameters make_inner_product_parameters(
     ip_pp.group_ctx = pp.group_ctx;
     ip_pp.ring_ctx = pp.ring_ctx;
     ip_pp.g = pp.vector_g;
-    ip_pp.h = std::vector<ECPoint>(pp.vector_length, ECPoint(pp.group_ctx));
-    for (std::size_t i = 0; i < pp.vector_length; ++i) {
-        ip_pp.h[i] = pp.vector_h[i] * y_inverse_power[i];
-    }
-    ip_pp.u = pp.inner_product_u * e;
+    ip_pp.h = pp.vector_h;
+    ip_pp.u = pp.inner_product_u;
     return ip_pp;
 }
 
@@ -168,14 +184,15 @@ PublicParameters setup(const std::shared_ptr<ECGroup>& group_ctx,
                    "binary-vector contexts cannot be null");
     TAIHANG_ASSERT(ring_ctx->modulus == group_ctx->order,
                    "binary-vector scalar modulus mismatch");
-    for (const ECPoint* base : {&g, &h, &u, &inner_product_u}) {
+    for ([[maybe_unused]] const ECPoint* base :
+         {&g, &h, &u, &inner_product_u}) {
         TAIHANG_ASSERT(base->group_ctx == group_ctx.get(),
                        "binary-vector base context mismatch");
         TAIHANG_ASSERT(!base->is_at_infinity(),
                        "binary-vector bases cannot be identities");
     }
     for (const std::vector<ECPoint>* generators : {&vector_g, &vector_h}) {
-        for (const ECPoint& generator : *generators) {
+        for ([[maybe_unused]] const ECPoint& generator : *generators) {
             TAIHANG_ASSERT(generator.group_ctx == group_ctx.get(),
                            "binary-vector generator context mismatch");
             TAIHANG_ASSERT(!generator.is_at_infinity(),
@@ -235,9 +252,13 @@ Proof prove(const PublicParameters& pp,
     const ScalarVector beta = gen_random_znelement_vector(pp.ring_ctx, length);
     const ZnElement rho = pp.ring_ctx->gen_random();
     Proof proof{
-        ec_point_msm(pp.vector_g, alpha) + ec_point_msm(pp.vector_h, beta) + pp.u * rho,
-        ECPoint(pp.group_ctx), ECPoint(pp.group_ctx),
-        ZnElement(pp.ring_ctx), ZnElement(pp.ring_ctx), ZnElement(pp.ring_ctx), {}
+        commit_vectors(pp.vector_g, pp.vector_h, pp.u, alpha, beta, rho),
+        ECPoint(pp.group_ctx),
+        ECPoint(pp.group_ctx),
+        ZnElement(pp.ring_ctx),
+        ZnElement(pp.ring_ctx),
+        ZnElement(pp.ring_ctx),
+        {}
     };
 
     std::ostringstream transcript;
@@ -294,11 +315,17 @@ Proof prove(const PublicParameters& pp,
     if (e.value.is_zero()) {
         e = one;
     }
-    const inner_product::PublicParameters ip_pp = make_inner_product_parameters(pp,
-        y_inverse_power, e);
-    const inner_product::Statement ip_statement{p + ip_pp.u * proof.t};
-    proof.inner_product = inner_product::prove(
-        ip_pp, ip_statement, {std::move(l_x), std::move(r_x)}, transcript.str());
+    const inner_product::PublicParameters ip_pp =
+        make_inner_product_parameters(pp);
+    const inner_product::Statement ip_statement{ec_point_msm(
+        p, one, ip_pp.u, e * proof.t)};
+    proof.inner_product = inner_product::detail::prove_with_factors(
+        ip_pp,
+        ip_statement,
+        {std::move(l_x), std::move(r_x)},
+        y_inverse_power,
+        e,
+        transcript.str());
     return proof;
 }
 
@@ -340,10 +367,9 @@ bool verify(const PublicParameters& pp,
     const ZnElement delta = (z - z * z) * sum_y +
         z * z * ZnElement(pp.ring_ctx, BigInt(uint64_t{statement.weight})) -
         z * z * z * ZnElement(pp.ring_ctx, BigInt(uint64_t{pp.vector_length}));
-    const ECPoint left = ec_point_msm(pp.g, proof.t, pp.h, proof.tau);
-    const ECPoint right = ec_point_msm(
-        {pp.g, proof.t1, proof.t2}, {delta, x, x * x});
-    if (left != right) {
+    if (!ec_point_msm({pp.g, pp.h, proof.t1, proof.t2},
+                      {proof.t - delta, proof.tau, -x, -x * x})
+             .is_at_infinity()) {
         return false;
     }
 
@@ -353,10 +379,16 @@ bool verify(const PublicParameters& pp,
     if (e.value.is_zero()) {
         e = one;
     }
-    const inner_product::PublicParameters ip_pp = make_inner_product_parameters(pp,
-        y_inverse_power, e);
-    const inner_product::Statement ip_statement{p + ip_pp.u * proof.t};
-    return inner_product::verify(ip_pp, ip_statement, proof.inner_product, transcript.str());
+    const inner_product::PublicParameters ip_pp =
+        make_inner_product_parameters(pp);
+    const inner_product::Statement ip_statement{ec_point_msm(
+        p, one, ip_pp.u, e * proof.t)};
+    return inner_product::detail::verify_with_factors(ip_pp,
+                                                      ip_statement,
+                                                      proof.inner_product,
+                                                      y_inverse_power,
+                                                      e,
+                                                      transcript.str());
 }
 
 } // namespace taihang::zkp::nizk::fixed_weight_binary_vector

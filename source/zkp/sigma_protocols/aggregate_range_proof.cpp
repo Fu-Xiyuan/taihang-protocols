@@ -22,6 +22,27 @@
 namespace taihang::zkp::nizk::aggregate_range {
 namespace {
 
+/** Commit both vectors and the blinding scalar in one MSM. */
+ECPoint commit_vectors(const std::vector<ECPoint>& g,
+                       const std::vector<ECPoint>& h,
+                       const ECPoint& u,
+                       const std::vector<ZnElement>& a,
+                       const std::vector<ZnElement>& b,
+                       const ZnElement& r) {
+    const std::size_t length = g.size();
+    std::vector<const ECPoint*> points(2 * length + 1, nullptr);
+    std::vector<ZnElement> scalars(points.size(), r.ring_ctx->get_zero());
+    for (std::size_t i = 0; i < length; ++i) {
+        points[i] = &g[i];
+        scalars[i] = a[i];
+        points[length + i] = &h[i];
+        scalars[length + i] = b[i];
+    }
+    points.back() = &u;
+    scalars.back() = r;
+    return ec_point_msm(points, scalars);
+}
+
 using ScalarVector = std::vector<ZnElement>;
 using taihang::arithmetic::is_pow2;
 namespace inner_product = taihang::zkp::range_proofs::inner_product;
@@ -114,10 +135,7 @@ ScalarVector bit_coefficients(const PublicParameters& pp,
     return result;
 }
 
-inner_product::PublicParameters inner_parameters(
-    const PublicParameters& pp,
-    const ScalarVector& inverse_y,
-    const ZnElement& e) {
+inner_product::PublicParameters inner_parameters(const PublicParameters& pp) {
     inner_product::PublicParameters ip;
     ip.curve_id = pp.curve_id;
     ip.vector_length = pp.vector_length;
@@ -125,28 +143,37 @@ inner_product::PublicParameters inner_parameters(
     ip.group_ctx = pp.group_ctx;
     ip.ring_ctx = pp.ring_ctx;
     ip.g = pp.vector_g;
-    ip.h = std::vector<ECPoint>(pp.vector_length, ECPoint(pp.group_ctx));
-    for (std::size_t i = 0; i < pp.vector_length; ++i) {
-        ip.h[i] = pp.vector_h[i] * inverse_y[i];
-    }
-    ip.u = pp.u * e;
+    ip.h = pp.vector_h;
+    ip.u = pp.u;
     return ip;
 }
 
 ECPoint inner_statement(const PublicParameters& pp,
                         const Proof& proof,
                         const inner_product::PublicParameters& ip,
-                        const ScalarVector& y,
+                        const ScalarVector& inverse_y,
                         const ScalarVector& coefficients,
                         const ZnElement& z,
-                        const ZnElement& x) {
-    ScalarVector left(pp.vector_length, -z);
-    ScalarVector right(pp.vector_length, pp.ring_ctx->get_zero());
-    for (std::size_t i = 0; i < pp.vector_length; ++i) {
-        right[i] = z * y[i] + coefficients[i];
+                        const ZnElement& x,
+                        const ZnElement& e) {
+    const std::size_t length = pp.vector_length;
+    std::vector<const ECPoint*> points(2 * length + 4, nullptr);
+    ScalarVector scalars(points.size(), pp.ring_ctx->get_zero());
+    for (std::size_t i = 0; i < length; ++i) {
+        points[i] = &ip.g[i];
+        scalars[i] = -z;
+        points[length + i] = &ip.h[i];
+        scalars[length + i] = z + inverse_y[i] * coefficients[i];
     }
-    return proof.a + proof.s * x + ec_point_msm(ip.g, left) + ec_point_msm(ip.h, right) -
-           pp.h * proof.mu + ip.u * proof.t;
+    points[2 * length] = &proof.a;
+    scalars[2 * length] = pp.ring_ctx->get_one();
+    points[2 * length + 1] = &proof.s;
+    scalars[2 * length + 1] = x;
+    points[2 * length + 2] = &pp.h;
+    scalars[2 * length + 2] = -proof.mu;
+    points[2 * length + 3] = &ip.u;
+    scalars[2 * length + 3] = e * proof.t;
+    return ec_point_msm(points, scalars);
 }
 
 struct ProverState {
@@ -232,10 +259,16 @@ DelayedProof prove_impl(const PublicParameters& pp,
     proof.mu = state.alpha + state.rho * x;
     transcript << x;
     const ZnElement e = challenge(transcript.str(), *pp.ring_ctx);
-    const inner_product::PublicParameters ip = inner_parameters(pp, powers(pp.vector_length,
-        y.inv()), e);
-    const ECPoint p = inner_statement(pp, proof, ip, y_power, coefficients, z, x);
-    proof.inner_product = inner_product::prove(ip, {p}, {std::move(l_x), std::move(r_x)},
+    const ScalarVector inverse_y = powers(pp.vector_length, y.inv());
+    const inner_product::PublicParameters ip = inner_parameters(pp);
+    const ECPoint p =
+        inner_statement(pp, proof, ip, inverse_y, coefficients, z, x, e);
+    proof.inner_product = inner_product::detail::prove_with_factors(
+        ip,
+        {p},
+        {std::move(l_x), std::move(r_x)},
+        inverse_y,
+        e,
         transcript.str());
     return proof;
 }
@@ -277,18 +310,19 @@ bool verify_impl(const PublicParameters& pp,
     }
     transcript << proof.t1 << proof.t2;
     const ZnElement x = challenge(transcript.str(), *pp.ring_ctx);
-    const ECPoint left = ec_point_msm(pp.g, proof.taux, pp.h, proof.t);
-    const ECPoint right = aggregate * factor + pp.h * delta +
-                          ec_point_msm(proof.t1, x, proof.t2, x * x);
-    if (left != right) {
+    if (!ec_point_msm({pp.g, pp.h, aggregate, proof.t1, proof.t2},
+                      {proof.taux, proof.t - delta, -factor, -x, -x * x})
+             .is_at_infinity()) {
         return false;
     }
     transcript << x;
     const ZnElement e = challenge(transcript.str(), *pp.ring_ctx);
-    const inner_product::PublicParameters ip = inner_parameters(pp, powers(pp.vector_length,
-        y.inv()), e);
-    const ECPoint p = inner_statement(pp, proof, ip, y_power, coefficients, z, x);
-    return inner_product::verify(ip, {p}, proof.inner_product, transcript.str());
+    const ScalarVector inverse_y = powers(pp.vector_length, y.inv());
+    const inner_product::PublicParameters ip = inner_parameters(pp);
+    const ECPoint p =
+        inner_statement(pp, proof, ip, inverse_y, coefficients, z, x, e);
+    return inner_product::detail::verify_with_factors(
+        ip, {p}, proof.inner_product, inverse_y, e, transcript.str());
 }
 
 } // namespace
@@ -313,7 +347,7 @@ PublicParameters setup(const std::shared_ptr<ECGroup>& group_ctx,
     const std::size_t length = padded_length(range_bits, value_count);
     TAIHANG_ASSERT(length > 0 && range_bits < ring_ctx->modulus.get_bit_length(),
                    "aggregate-range invalid dimensions or range width");
-    for (const ECPoint* base : {&g, &h, &u}) {
+    for ([[maybe_unused]] const ECPoint* base : {&g, &h, &u}) {
         TAIHANG_ASSERT(base->group_ctx == group_ctx.get() && !base->is_at_infinity(),
                        "aggregate-range invalid base");
     }
@@ -413,6 +447,7 @@ ScalarVector delayed_weights(const PublicParameters& pp,
 }
 
 namespace {
+
 ProverState prepare(const PublicParameters& pp, const ScalarVector& values) {
     TAIHANG_ASSERT(valid_dimensions(pp) && values.size() == pp.value_count,
                    "aggregate-range preparation dimensions mismatch");
@@ -432,10 +467,14 @@ ProverState prepare(const PublicParameters& pp, const ScalarVector& values) {
             state.a_right[index] = state.a_left[index] - one;
         }
     }
-    state.a = ec_point_msm(pp.vector_g, state.a_left) +
-              ec_point_msm(pp.vector_h, state.a_right) + pp.h * state.alpha;
-    state.s = ec_point_msm(pp.vector_g, state.s_left) +
-              ec_point_msm(pp.vector_h, state.s_right) + pp.h * state.rho;
+    state.a = commit_vectors(pp.vector_g,
+                             pp.vector_h,
+                             pp.h,
+                             state.a_left,
+                             state.a_right,
+                             state.alpha);
+    state.s = commit_vectors(
+        pp.vector_g, pp.vector_h, pp.h, state.s_left, state.s_right, state.rho);
     return state;
 }
 

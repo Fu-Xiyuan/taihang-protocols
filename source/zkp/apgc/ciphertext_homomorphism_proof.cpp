@@ -72,6 +72,7 @@ evaluation::Statement relation(const PublicParameters& pp,
         std::vector<ECPoint>(2 * pp.participant_count,
                              ECPoint(pp.encryption.group_ctx))
     };
+    std::vector<const ECPoint*> points(2 * pp.participant_count, nullptr);
     for (std::size_t i = 0; i < pp.participant_count; ++i) {
         result.bases[i] = ec_point_msm(statement.public_keys[i],
                                        rho[i],
@@ -79,11 +80,10 @@ evaluation::Statement relation(const PublicParameters& pp,
                                        rho[pp.participant_count + i]);
         result.bases[pp.participant_count + i] =
             pp.encryption.h * rho[pp.participant_count + i];
-        result.q = result.q + ec_point_msm(statement.transfers[i].c1,
-                                           rho[i],
-                                           statement.transfers[i].c2,
-                                           rho[pp.participant_count + i]);
+        points[i] = &statement.transfers[i].c1;
+        points[pp.participant_count + i] = &statement.transfers[i].c2;
     }
+    result.q = ec_point_msm(points, rho);
     return result;
 }
 
